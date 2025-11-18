@@ -1,4 +1,4 @@
-# <img src="klamap-icon.png" alt="klamap icon" width="150" align="top"> klamap
+# <img src="klamap-icon.png" alt="klamap icon" width="60" align="top"> klamap
 
 Native iOS/macOS app to design cinematic map routes and camera paths, exporting high-quality videos and image sequences between points A and B — an Apple-centric alternative to Google Earth Studio.
 
