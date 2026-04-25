@@ -1,0 +1,97 @@
+name: iOS Build (unsigned IPA)
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - 'feat/**'
+      - 'fix/**'
+  pull_request:
+  workflow_dispatch:
+  release:
+    types: [created]
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show available Xcode versions
+        run: ls /Applications | grep -i ^Xcode || true
+
+      - name: Select latest Xcode
+        run: |
+          # Prefer Xcode 26 (matches the project's CreatedOnToolsVersion 26.0.1).
+          # Fall back to whatever the runner has if 26 isn't installed yet.
+          if [ -d "/Applications/Xcode_26.0.app" ]; then
+            sudo xcode-select -s /Applications/Xcode_26.0.app
+          elif [ -d "/Applications/Xcode_26.app" ]; then
+            sudo xcode-select -s /Applications/Xcode_26.app
+          else
+            sudo xcode-select -s /Applications/Xcode.app
+          fi
+          xcodebuild -version
+
+      - name: List schemes/targets (debug aid)
+        working-directory: klamap
+        run: xcodebuild -project klamap.xcodeproj -list || true
+
+      - name: Build unsigned .app
+        working-directory: klamap
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project klamap.xcodeproj \
+            -scheme klamap \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath ./DerivedData \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            DEVELOPMENT_TEAM="" \
+            ONLY_ACTIVE_ARCH=NO \
+            clean build
+
+      - name: Package as unsigned IPA
+        working-directory: klamap
+        run: |
+          set -euo pipefail
+          APP_PATH="DerivedData/Build/Products/Release-iphoneos/klamap.app"
+          if [ ! -d "$APP_PATH" ]; then
+            echo "ERROR: $APP_PATH not found"
+            find DerivedData -name "*.app" -maxdepth 6 -type d
+            exit 1
+          fi
+          rm -rf Payload
+          mkdir -p Payload
+          cp -R "$APP_PATH" Payload/
+          # Strip code signature to make it cleanly resign-able by AltStore / Sideloadly.
+          /usr/bin/codesign --remove-signature "Payload/klamap.app" || true
+          if [ -d "Payload/klamap.app/Frameworks" ]; then
+            for f in Payload/klamap.app/Frameworks/*; do
+              /usr/bin/codesign --remove-signature "$f" || true
+            done
+          fi
+          zip -qr klamap-unsigned.ipa Payload
+          rm -rf Payload
+          ls -lh klamap-unsigned.ipa
+
+      - name: Upload unsigned IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: klamap-unsigned-ipa
+          path: klamap/klamap-unsigned.ipa
+          retention-days: 30
+
+      - name: Attach IPA to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: klamap/klamap-unsigned.ipa

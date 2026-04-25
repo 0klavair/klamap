@@ -152,6 +152,14 @@ protocol LocalizationStrings {
     var exportImage: String { get }
     var exportVideo: String { get }
     var exportZip: String { get }
+    var createTendies: String { get }
+    var tendiesSubtitle: String { get }
+    var tendiesRendering: String { get }
+    var tendiesPackaging: String { get }
+    var tendiesComplete: String { get }
+    var tendiesYourFile: String { get }
+    var tendiesError: String { get }
+    var defineABBeforeTendies: String { get }
     var cancelRender: String { get }
     var cancelling: String { get }
     var renderComplete: String { get }
@@ -434,6 +442,16 @@ struct FrenchStrings: LocalizationStrings {
     let height = "Hauteur"
     let tip = "Astuce"
     let yourZipFile = "Ton fichier ZIP contient toutes les images de la séquence."
+
+    // Tendies wallpaper export
+    let createTendies = "Fond d'écran iOS"
+    let tendiesSubtitle = "Wallpaper animé .tendies"
+    let tendiesRendering = "Rendu des frames…"
+    let tendiesPackaging = "Empaquetage du wallpaper…"
+    let tendiesComplete = "Wallpaper prêt"
+    let tendiesYourFile = "Ton fichier .tendies est prêt. Importe-le dans Nugget ou Cowabunga pour l'installer comme fond d'écran animé sur l'iPhone."
+    let tendiesError = "Erreur export Tendies"
+    let defineABBeforeTendies = "Définis les points A et B avant de générer un fond d'écran."
 }
 
 struct EnglishStrings: LocalizationStrings {
@@ -633,6 +651,16 @@ struct EnglishStrings: LocalizationStrings {
     let height = "Height"
     let tip = "Tip"
     let yourZipFile = "Your ZIP file contains all the sequence images."
+
+    // Tendies wallpaper export
+    let createTendies = "iOS Wallpaper"
+    let tendiesSubtitle = "Animated .tendies wallpaper"
+    let tendiesRendering = "Rendering frames…"
+    let tendiesPackaging = "Packaging wallpaper…"
+    let tendiesComplete = "Wallpaper ready"
+    let tendiesYourFile = "Your .tendies file is ready. Import it via Nugget or Cowabunga to install it as an animated lock-screen wallpaper."
+    let tendiesError = "Tendies export error"
+    let defineABBeforeTendies = "Define points A and B before generating a wallpaper."
 }
 
 // MARK: - Missing helpers & placeholders added for buildability
@@ -747,7 +775,19 @@ struct WallpaperMakerView: View {
                 latitude: lerp(c0.latitude, c1.latitude, localT),
                 longitude: lerp(c0.longitude, c1.longitude, localT)
             )
-            headingFromRoute = bearing(from: c0, to: c1)
+            // MKDirections sometimes returns identical consecutive points around
+            // intersections — that would make atan2 collapse and the camera "jump
+            // to north" mid-route. Walk forward until we find a real next point.
+            let nextDistinct = RenderEngine.findValidBearingTarget(
+                start: c0,
+                in: routeCoordinates,
+                startingAt: i1
+            ) ?? c1
+            headingFromRoute = RenderEngine.safeBearing(
+                from: c0,
+                to: nextDistinct,
+                fallback: currentPose.heading
+            )
         } else {
             // Pas de route réelle : simple interpolation A→B
             coord = CLLocationCoordinate2D(
@@ -799,16 +839,11 @@ struct WallpaperMakerView: View {
     }
 
     private func bearing(from: CLLocationCoordinate2D, to: CLLocationCoordinate2D) -> CLLocationDirection {
-        let lat1 = from.latitude * .pi / 180
-        let lon1 = from.longitude * .pi / 180
-        let lat2 = to.latitude * .pi / 180
-        let lon2 = to.longitude * .pi / 180
-        let dLon = lon2 - lon1
-        let y = sin(dLon) * cos(lat2)
-        let x = cos(lat1) * cos(lat2) + sin(lat1) * sin(lat2) * cos(dLon)
-        var brng = atan2(y, x) * 180 / .pi
-        if brng < 0 { brng += 360 }
-        return brng
+        // Delegates to RenderEngine.safeBearing which guards against duplicate points
+        // (atan2(0,0) snapping the camera to north) and NaN propagation. The fallback
+        // here is the current pose heading so we keep visual continuity if the route
+        // segment is degenerate.
+        return RenderEngine.safeBearing(from: from, to: to, fallback: currentPose.heading)
     }
 
     /// Profil de progression simulant une circulation réelle (ralentissements, arrêts)
@@ -926,6 +961,25 @@ struct WallpaperMakerView: View {
                 progressLabel = L.exportZip
 
                 Task { await exportImageSequence() }
+            }
+
+            actionTile(
+                icon: "iphone.gen3",
+                title: L.createTendies,
+                subtitle: canRenderPath ? L.tendiesSubtitle : L.setABFirst,
+                disabled: false
+            ) {
+                hapticButtonTap(style: .medium)
+                guard pointA != nil && pointB != nil else {
+                    errorText = L.defineABBeforeTendies
+                    return
+                }
+                capPlaygroundFileURL = nil
+                outputMode = .tendies
+                showRenderOverlay = true
+                renderFinished = false
+                progressLabel = L.preparing
+                Task { await exportTendies() }
             }
         }
     }
@@ -1205,7 +1259,7 @@ struct WallpaperMakerView: View {
     @State private var savedOK = false
 
     // Output mode & cancellation
-    enum OutputMode: String, CaseIterable, Identifiable { case preview, image, video, sequence; var id: String { rawValue } }
+    enum OutputMode: String, CaseIterable, Identifiable { case preview, image, video, sequence, tendies; var id: String { rawValue } }
     @State private var outputMode: OutputMode = .video
     @State private var cancelRequested: Bool = false
     @State private var showHybridWarning: Bool = false
@@ -2632,17 +2686,17 @@ struct WallpaperMakerView: View {
                             }
 
                         } else if renderFinished && errorText == nil {
-                            if outputMode == .sequence {
-                                // Cas spécial : ZIP sequence (.zip)
-                                Image(systemName: "checkmark.circle.fill")
+                            if outputMode == .sequence || outputMode == .tendies {
+                                // Cas spécial : ZIP sequence (.zip) ou wallpaper (.tendies)
+                                Image(systemName: outputMode == .tendies ? "iphone.gen3" : "checkmark.circle.fill")
                                     .font(.system(size: 52))
                                     .foregroundColor(.green)
 
-                                Text(L.exportZipComplete)
+                                Text(outputMode == .tendies ? L.tendiesComplete : L.exportZipComplete)
                                     .font(.headline)
                                     .foregroundColor(.green)
 
-                                Text(L.yourZipFile)
+                                Text(outputMode == .tendies ? L.tendiesYourFile : L.yourZipFile)
                                     .font(.footnote)
                                     .foregroundStyle(.secondary)
                                     .multilineTextAlignment(.center)
@@ -2963,6 +3017,158 @@ struct WallpaperMakerView: View {
     private func makePathVideo() async {
         // Utilise le nouvel export vidéo
         await exportVideoClean()
+    }
+
+    // MARK: - Tendies (.tendies) export
+    //
+    // Renders frames in parallel via RenderEngine, writes them as JPEGs to a temp
+    // directory, then asks TendiesExporter to package them into an iOS-ready
+    // animated wallpaper. The final .tendies is shared via the existing share
+    // sheet (presetToShareURL / capPlaygroundFileURL).
+    @MainActor
+    private func exportTendies() async {
+        guard pointA != nil && pointB != nil else {
+            errorText = L.defineABBeforeTendies
+            return
+        }
+
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        generating = true
+        showRenderOverlay = true
+        renderFinished = false
+        errorText = nil
+        savedOK = false
+        cancelRequested = false
+        progressLabel = L.preparing
+
+        #if canImport(UIKit)
+        UIApplication.shared.isIdleTimerDisabled = true
+        #endif
+
+        defer {
+            generating = false
+            #if canImport(UIKit)
+            UIApplication.shared.isIdleTimerDisabled = false
+            #endif
+        }
+
+        // Frame count: respect the user's existing duration / fps / fixed-frames choice.
+        let fps_local = max(1, fps)
+        let totalFrames: Int
+        switch frameCountMode {
+        case .duration:
+            totalFrames = max(1, seconds * fps_local)
+        case .fixedFrames:
+            totalFrames = max(1, fixedFrameCount)
+        }
+
+        // iPhone wallpaper standard: 390x844 points @ 3x = 1170x2532 pixels.
+        let width = 1170
+        let height = 2532
+
+        // Pre-compute camera states upfront (same approach as exportVideoClean).
+        let pathStates: [CameraState] = (0..<totalFrames).map { i in
+            let t = CGFloat(i) / CGFloat(max(1, totalFrames - 1))
+            let p = self.pathPoint(t)
+            return CameraState(
+                coord: p.coord,
+                distance: p.pose.distance,
+                pitch: p.pose.pitch,
+                heading: p.pose.heading
+            )
+        }
+
+        let style: SnapshotConfig.Style
+        switch liveStyle {
+        case .standard: style = .standard
+        case .muted:    style = .muted
+        case .hybrid:   style = .hybrid
+        }
+        let config = SnapshotConfig(
+            style: style,
+            showPOI: showPOI,
+            hideRoadLabels: hideRoadLabels,
+            realisticElevationWhenPitched: true
+        )
+
+        // Working directory for JPEG frames.
+        let frameDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tendies-frames-\(UUID().uuidString)", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: frameDir, withIntermediateDirectories: true)
+        } catch {
+            errorText = "\(L.tendiesError): \(error.localizedDescription)"
+            showRenderOverlay = false
+            return
+        }
+        defer { try? FileManager.default.removeItem(at: frameDir) }
+
+        let digits = max(3, String(totalFrames).count)
+
+        progressLabel = L.tendiesRendering
+        await RenderEngine.renderFramesParallel(
+            states: pathStates,
+            width: width,
+            height: height,
+            config: config,
+            cancel: { self.cancelRequested },
+            onFrame: { idx, cg in
+                let name = String(format: "%0*d.jpg", digits, idx)
+                let url = frameDir.appendingPathComponent(name)
+                try? TendiesExporter.writeCGImageAsJPEG(cg, to: url, quality: 0.9)
+            },
+            onProgress: { done, total in
+                self.renderProgress = Double(done) / Double(total)
+                self.progressLabel = "\(self.L.frame) \(done) / \(total)"
+            }
+        )
+
+        if cancelRequested {
+            cancelRequested = false
+            errorText = L.exportCancelled
+            showRenderOverlay = false
+            return
+        }
+
+        // Sanity check: make sure every frame landed.
+        let writtenCount = (try? FileManager.default.contentsOfDirectory(at: frameDir, includingPropertiesForKeys: nil).count) ?? 0
+        guard writtenCount == totalFrames else {
+            errorText = "\(L.tendiesError): \(writtenCount)/\(totalFrames) frames"
+            showRenderOverlay = false
+            return
+        }
+
+        progressLabel = L.tendiesPackaging
+        let duration = Double(totalFrames) / Double(fps_local)
+        let params = TendiesParams(
+            name: "klamap-wallpaper",
+            width: 390,
+            height: 844,
+            fps: fps_local,
+            duration: duration,
+            autoReverses: false,
+            syncWithState: true,
+            jpegQuality: 0.9
+        )
+
+        do {
+            let outURL = try await TendiesExporter.makeTendies(
+                framesDirectory: frameDir,
+                params: params,
+                onProgress: { p, label in
+                    Task { @MainActor in
+                        self.renderProgress = p
+                        self.progressLabel = label
+                    }
+                }
+            )
+            presetToShareURL = outURL
+            capPlaygroundFileURL = outURL
+            renderFinished = true
+        } catch {
+            errorText = "\(L.tendiesError): \(error.localizedDescription)"
+            showRenderOverlay = false
+        }
     }
 
     @MainActor
