@@ -118,10 +118,19 @@ enum TendiesTemplate {
         // State transitions: each frame sublayer's zPosition gets animated with a
         // CASpringAnimation when the lock-screen state changes. The slide gesture
         // drives the spring's progress, scrubbing through frames.
+        //
+        // Spring duration is now ADAPTIVE: it tracks the video duration so the
+        // slide-to-unlock gesture covers the full animation. With more frames
+        // (higher fps × same duration) the user gets a smoother z-stack scrub
+        // because there are more interpolation steps.
+        // Capped at [0.4, 2.0] so very short / very long wallpapers still feel
+        // natural during the unlock gesture.
+        let springDuration = max(0.4, min(2.0, duration))
+        let springDurationStr = String(format: "%.6f", springDuration)
         let transitionElements = (0..<frameCount).map { i in
             """
                   <LKStateTransitionElement targetId="\(videoLayerId)_frame_\(i)" key="zPosition">
-                    <animation type="CASpringAnimation" damping="50" mass="2" stiffness="300" velocity="0" duration="0.8" fillMode="backwards" keyPath="zPosition" mica_autorecalculatesDuration="1"/>
+                    <animation type="CASpringAnimation" damping="50" mass="2" stiffness="300" velocity="0" duration="\(springDurationStr)" fillMode="backwards" keyPath="zPosition" mica_autorecalculatesDuration="1"/>
                   </LKStateTransitionElement>
             """
         }.joined(separator: "\n")
