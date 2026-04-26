@@ -50,6 +50,7 @@ enum RenderEngine {
         height: Int,
         config: SnapshotConfig,
         polylineLatLons: [Double]? = nil,
+        filter: RenderFilter = .none,
         concurrency: Int = RenderEngine.defaultConcurrency,
         cancel: @escaping @MainActor () -> Bool,
         onFrame: @escaping @MainActor (Int, CGImage) async -> Void,
@@ -100,9 +101,16 @@ enum RenderEngine {
         if cancel() { return }
 
         // Drive a TaskGroup with a sliding window of N concurrent snapshots.
+        // CRITICAL: hybrid + realistic 3D has a race on tile loading when multiple
+        // MKMapSnapshotter instances are in flight at once — each independently
+        // races to load mesh tiles, causing trembling/glitching at the end of the
+        // route. Force concurrency=1 with a settle delay for that one combo. The
+        // user explicitly accepts the slower render for a clean realistic 3D look.
+        let isFragileHybrid = (config.style == .hybrid && config.realisticElevationWhenPitched)
+        let cap = isFragileHybrid ? 1 : max(1, concurrency)
+        let postSnapSettleNs: UInt64 = isFragileHybrid ? 80_000_000 : 0  // 80 ms
         var nextIdx = 0
         var completed = 0
-        let cap = max(1, concurrency)
         let polyline = polylineLatLons  // capture for closures
 
         await withTaskGroup(of: (Int, CGImage?).self) { group in
@@ -112,6 +120,8 @@ enum RenderEngine {
                 let h = height
                 let cfg = config
                 let poly = polyline
+                let settleNs = postSnapSettleNs
+                let filt = filter
                 group.addTask {
                     let cg = await RenderEngine.snapshotPure(
                         lat: s.lat, lon: s.lon,
@@ -120,8 +130,12 @@ enum RenderEngine {
                         style: cfg.style, showPOI: cfg.showPOI,
                         hideRoadLabels: cfg.hideRoadLabels,
                         realisticElevation: cfg.realisticElevationWhenPitched,
-                        polylineLatLons: poly
+                        polylineLatLons: poly,
+                        filter: filt
                     )
+                    if settleNs > 0 {
+                        try? await Task.sleep(nanoseconds: settleNs)
+                    }
                     if let cg = cg, RenderEngine.isLikelyBlank(cg) {
                         try? await Task.sleep(nanoseconds: 30_000_000)
                         let retried = await RenderEngine.snapshotPure(
@@ -131,7 +145,8 @@ enum RenderEngine {
                             style: cfg.style, showPOI: cfg.showPOI,
                             hideRoadLabels: cfg.hideRoadLabels,
                             realisticElevation: cfg.realisticElevationWhenPitched,
-                            polylineLatLons: poly
+                            polylineLatLons: poly,
+                            filter: filt
                         )
                         return (i, retried ?? cg)
                     }
@@ -202,7 +217,8 @@ enum RenderEngine {
         realisticElevation: Bool,
         polylineLatLons: [Double]? = nil,
         polylineColorRGBA: (Double, Double, Double, Double) = (0, 122.0/255.0, 1, 1),
-        polylineWidth: Double = 5
+        polylineWidth: Double = 5,
+        filter: RenderFilter = .none
     ) async -> CGImage? {
         let safeDistance = guardDistance(distance, pitch: pitch)
         let safePitch = guardPitch(pitch)
@@ -241,9 +257,15 @@ enum RenderEngine {
                     return
                 }
 
-                // No polyline → just hand back the raw snapshot.
+                // Helper to apply optional CIFilter post-processing before return.
+                func finalize(_ cg: CGImage?) -> CGImage? {
+                    guard let cg = cg else { return nil }
+                    return RenderFilter.apply(filter, to: cg)
+                }
+
+                // No polyline → just hand back the (optionally filtered) raw snapshot.
                 guard let coords = polylineLatLons, coords.count >= 4 else {
-                    cont.resume(returning: snapshot.image.cgImage)
+                    cont.resume(returning: finalize(snapshot.image.cgImage))
                     return
                 }
 
@@ -279,7 +301,7 @@ enum RenderEngine {
                 }
                 let composited = UIGraphicsGetImageFromCurrentImageContext()
                 UIGraphicsEndImageContext()
-                cont.resume(returning: composited?.cgImage ?? baseImage.cgImage)
+                cont.resume(returning: finalize(composited?.cgImage ?? baseImage.cgImage))
             }
         }
     }

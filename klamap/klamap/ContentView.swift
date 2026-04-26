@@ -191,6 +191,7 @@ protocol LocalizationStrings {
     var presentationMode: String { get }
     var clear: String { get }
     var preset: String { get }
+    var filter: String { get }
 
     var cancelRender: String { get }
     var cancelling: String { get }
@@ -514,6 +515,7 @@ struct FrenchStrings: LocalizationStrings {
     let presentationMode = "Mode présentation"
     let clear = "Effacer"
     let preset = "Préréglage"
+    let filter = "Filtre"
 }
 
 struct EnglishStrings: LocalizationStrings {
@@ -753,6 +755,7 @@ struct EnglishStrings: LocalizationStrings {
     let presentationMode = "Presentation mode"
     let clear = "Clear"
     let preset = "Preset"
+    let filter = "Filter"
 }
 
 // MARK: - Missing helpers & placeholders added for buildability
@@ -1419,6 +1422,9 @@ struct WallpaperMakerView: View {
     }
 
     @State private var selectedPreset: CameraPreset? = nil
+
+    /// Selected post-processing color filter applied to every exported frame.
+    @State private var selectedFilter: RenderFilter = .none
 
     /// Apply preset values to the relevant state vars. Distance/heading are left
     /// to the user's current map view (the preset doesn't yank the camera off the
@@ -2639,6 +2645,44 @@ struct WallpaperMakerView: View {
                 }
             }
 
+            // Filter picker — real CIFilter color grading applied to every
+            // exported frame. Visual only, doesn't affect the live preview.
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text(L.filter)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text(selectedFilter.displayName)
+                        .font(.footnote)
+                        .foregroundStyle(.tertiary)
+                }
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(RenderFilter.allCases) { f in
+                            Button {
+                                hapticButtonTap(style: .light)
+                                selectedFilter = f
+                            } label: {
+                                Text(f.displayName)
+                                    .font(.footnote.weight(selectedFilter == f ? .semibold : .regular))
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 8)
+                                    .background(
+                                        Capsule().fill(selectedFilter == f
+                                            ? Color.accentColor.opacity(0.25)
+                                            : Color.gray.opacity(0.12))
+                                    )
+                                    .foregroundStyle(.primary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+            .padding(.bottom, 4)
+
             Toggle(L.followRealRoute, isOn: $useRoutePath)
                 .onChange(of: useRoutePath) { _, newVal in
                     if newVal {
@@ -3493,13 +3537,14 @@ struct WallpaperMakerView: View {
             let buildings3D = mapSettings.useGoogleBuilding3D
             for (idx, state) in pathStates.enumerated() {
                 if cancelRequested { break }
-                if let cg = await GoogleMapsRenderer.shared.snapshot(
+                if let raw = await GoogleMapsRenderer.shared.snapshot(
                     state: state,
                     widthPx: width,
                     heightPx: height,
                     styleJSON: styleJSON,
                     building3D: buildings3D
                 ) {
+                    let cg = RenderFilter.apply(selectedFilter, to: raw)
                     let name = String(format: "%0*d.jpg", digits, idx)
                     let url = frameDir.appendingPathComponent(name)
                     try? TendiesExporter.writeCGImageAsJPEG(cg, to: url, quality: 0.9)
@@ -3522,6 +3567,7 @@ struct WallpaperMakerView: View {
                 height: height,
                 config: config,
                 polylineLatLons: polylineLatLons,
+                filter: selectedFilter,
                 cancel: { self.cancelRequested },
                 onFrame: { idx, cg in
                     let name = String(format: "%0*d.jpg", digits, idx)
@@ -4311,18 +4357,21 @@ struct WallpaperMakerView: View {
             let buildings3D = mapSettings.useGoogleBuilding3D
             for (idx, state) in pathStates.enumerated() {
                 if cancelRequested { break }
-                if let cg = await GoogleMapsRenderer.shared.snapshot(
+                if let raw = await GoogleMapsRenderer.shared.snapshot(
                     state: state,
                     widthPx: width,
                     heightPx: height,
                     styleJSON: styleJSON,
                     building3D: buildings3D
-                ), let buf = makePixelBuffer(from: cg, width: width, height: height) {
-                    while !input.isReadyForMoreMediaData {
-                        try? await Task.sleep(nanoseconds: 2_000_000)
+                ) {
+                    let cg = RenderFilter.apply(selectedFilter, to: raw)
+                    if let buf = makePixelBuffer(from: cg, width: width, height: height) {
+                        while !input.isReadyForMoreMediaData {
+                            try? await Task.sleep(nanoseconds: 2_000_000)
+                        }
+                        let pts = CMTimeMultiply(frameDuration, multiplier: Int32(idx))
+                        _ = adaptor.append(buf, withPresentationTime: pts)
                     }
-                    let pts = CMTimeMultiply(frameDuration, multiplier: Int32(idx))
-                    _ = adaptor.append(buf, withPresentationTime: pts)
                 }
                 let done = idx + 1
                 renderProgress = Double(done) / Double(totalFrames)
@@ -4341,6 +4390,7 @@ struct WallpaperMakerView: View {
                 height: height,
                 config: config,
                 polylineLatLons: polylineLatLons,
+                filter: selectedFilter,
                 cancel: { self.cancelRequested },
                 onFrame: { idx, cg in
                     pendingFrames[idx] = cg
