@@ -50,29 +50,40 @@ enum TendiesTemplate {
     static func emptyMainCAML(layerName: String, width: Int, height: Int) -> String {
         let cx = width / 2
         let cy = height / 2
-        let stateBlock = standardStateBlock()
         return """
         <?xml version="1.0" encoding="UTF-8"?>
-
         <caml xmlns="http://www.apple.com/CoreAnimation/1.0">
-          <CALayer allowsEdgeAntialiasing="1" allowsGroupOpacity="1" bounds="0 0 \(width) \(height)" contentsFormat="RGBA8" cornerCurve="circular" geometryFlipped="1" hidden="0" name="Root Layer" position="\(cx) \(cy)">
+          <CALayer id="__capRootLayer__" name="CAPlayground Root Layer" bounds="0 0 \(width) \(height)" position="\(cx) \(cy)" zPosition="undefined" geometryFlipped="0" opacity="1" transform.rotation.z="0" transform.rotation.x="0" transform.rotation.y="0" transform="rotate(0deg) rotate(0deg, 0, 1, 0) rotate(0deg, 1, 0, 0)" allowsEdgeAntialiasing="1" allowsGroupOpacity="1" contentsFormat="RGBA8" cornerCurve="circular">
             <sublayers>
-              <CALayer id="\(layerName)Layer" allowsEdgeAntialiasing="1" allowsGroupOpacity="1" bounds="0 0 \(width) \(height)" contentsFormat="RGBA8" cornerCurve="circular" name="\(escapeXML(layerName))" position="\(cx) \(cy)"/>
+              <CALayer id="\(layerName)Inner" name="Root Layer" bounds="0 0 \(width) \(height)" position="\(cx) \(cy)" zPosition="undefined" geometryFlipped="0" opacity="1" transform.rotation.z="0" transform.rotation.x="0" transform.rotation.y="0" transform="rotate(0deg) rotate(0deg, 0, 1, 0) rotate(0deg, 1, 0, 0)" allowsEdgeAntialiasing="1" allowsGroupOpacity="1" contentsFormat="RGBA8" cornerCurve="circular"/>
             </sublayers>
-            <scriptComponents/>
-        \(stateBlock)
+            <states>
+              <LKState name="Locked"><elements/></LKState>
+              <LKState name="Unlock"><elements/></LKState>
+              <LKState name="Sleep"><elements/></LKState>
+            </states>
+            <stateTransitions>
+              <LKStateTransition fromState="*" toState="Unlock"><elements/></LKStateTransition>
+              <LKStateTransition fromState="Unlock" toState="*"><elements/></LKStateTransition>
+              <LKStateTransition fromState="*" toState="Locked"><elements/></LKStateTransition>
+              <LKStateTransition fromState="Locked" toState="*"><elements/></LKStateTransition>
+              <LKStateTransition fromState="*" toState="Sleep"><elements/></LKStateTransition>
+              <LKStateTransition fromState="Sleep" toState="*"><elements/></LKStateTransition>
+            </stateTransitions>
           </CALayer>
         </caml>
         """
     }
 
     /// Generates the Floating .ca main.caml that contains a video layer with frame keyframes.
-    /// Replicates Apple's WWDC22 wallpaper structure exactly:
-    /// - One CALayer sublayer PER FRAME, each with its own zPosition (triangular: 0, -1, -3, -6, -10…)
-    /// - Animation driven by stateTransitions on zPosition with CASpringAnimation
-    /// - This is what makes caplaySyncWWithState actually work — the slide-to-unlock
-    ///   gesture interpolates the spring animation, scrubbing through the frames
-    ///   by changing which one is on top of the z-stack
+    /// Replicates Apple's WWDC22 wallpaper structure EXACTLY (attribute names, ordering,
+    /// values) — including all the transform.rotation.* attributes, zPosition="undefined"
+    /// on parents, and consistent CALayer attributes on every frame sublayer.
+    ///
+    /// Spring duration is FIXED at 0.8s — that's the duration of the iOS slide-to-unlock
+    /// gesture. Matching it makes the z-stack scrub feel native. Adaptive duration
+    /// (= video duration) was a mistake: a 6 s video gave a 2 s spring → user perceives
+    /// "rien ne se passe" because the slide finishes way before the spring scrub.
     static func videoMainCAML(
         layerName: String,
         width: Int,
@@ -89,15 +100,28 @@ enum TendiesTemplate {
         let cy = height / 2
         let normalizedExt = frameExt.hasPrefix(".") ? frameExt : ".\(frameExt)"
         let durationStr = String(format: "%.6f", duration)
-        let videoLayerId = "videoLayer"
+        let videoLayerId = "videoLayer_\(UUID().uuidString.prefix(16))"
 
-        // Apple uses slightly larger video bounds than the wallpaper (≈ 1.017× extra
-        // for parallax headroom) and offsets position by +3pt in both axes.
-        let videoBoundsW = Double(width) * 1.0174
-        let videoBoundsH = Double(height) * 1.0174
-        let videoBoundsStr = String(format: "0 0 %.10f %.10f", videoBoundsW, videoBoundsH)
-        let videoPosX = cx + 3
-        let videoPosY = cy + 7
+        // Apple uses bounds slightly bigger than the wallpaper for parallax headroom
+        // (~+1.745% on each axis, with 9-decimal precision).
+        let scale = 1.01745846
+        let videoBoundsW = Double(width) * scale
+        let videoBoundsH = Double(height) * scale
+        let videoBoundsStr = String(format: "0 0 %.14f %.14f", videoBoundsW, videoBoundsH)
+        // Apple positions the frame layers at +3, +7 from the wallpaper centre.
+        let videoFramePosX = cx + 3
+        let videoFramePosY = cy + 7
+        // Apple names the video layer "export_<UUID>.mov" (the source video name).
+        // We pick the same UUID as the frame prefix for consistency.
+        let videoLayerName: String = {
+            if framePrefix.hasPrefix("export_") && framePrefix.hasSuffix("_") {
+                let uuidPart = framePrefix
+                    .dropFirst("export_".count)
+                    .dropLast()
+                return "export_\(uuidPart).mov"
+            }
+            return layerName
+        }()
 
         // One sublayer per frame. zPosition follows triangular progression so the
         // unlock spring has something to interpolate between.
@@ -105,8 +129,9 @@ enum TendiesTemplate {
         for i in 0..<frameCount {
             let zPos = -(i * (i + 1)) / 2  // 0, -1, -3, -6, -10, -15, -21, …
             let path = "assets/\(framePrefix)\(i)\(normalizedExt)"
+            // EVERY attribute Apple uses, in Apple's ordering.
             frameSublayers += """
-                      <CALayer id="\(videoLayerId)_frame_\(i)" name="\(videoLayerId)_frame_\(i)" allowsEdgeAntialiasing="1" allowsGroupOpacity="1" bounds="\(videoBoundsStr)" contentsFormat="RGBA8" cornerCurve="circular" opacity="1" position="\(videoPosX) \(videoPosY)" zPosition="\(zPos)">
+                      <CALayer id="\(videoLayerId)_frame_\(i)" name="\(videoLayerId)_frame_\(i)" bounds="\(videoBoundsStr)" position="\(videoFramePosX) \(videoFramePosY)" zPosition="\(zPos)" opacity="1" transform.rotation.z="0" transform.rotation.x="0" transform.rotation.y="0" transform="rotate(0deg) rotate(0deg, 0, 1, 0) rotate(0deg, 1, 0, 0)" allowsEdgeAntialiasing="1" allowsGroupOpacity="1" contentsFormat="RGBA8" cornerCurve="circular">
                         <contents>
                           <CGImage src="\(escapeXML(path))"/>
                         </contents>
@@ -116,25 +141,22 @@ enum TendiesTemplate {
         }
 
         // State transitions: each frame sublayer's zPosition gets animated with a
-        // CASpringAnimation when the lock-screen state changes. The slide gesture
-        // drives the spring's progress, scrubbing through frames.
-        //
-        // Spring duration is now ADAPTIVE: it tracks the video duration so the
-        // slide-to-unlock gesture covers the full animation. With more frames
-        // (higher fps × same duration) the user gets a smoother z-stack scrub
-        // because there are more interpolation steps.
-        // Capped at [0.4, 2.0] so very short / very long wallpapers still feel
-        // natural during the unlock gesture.
-        let springDuration = max(0.4, min(2.0, duration))
-        let springDurationStr = String(format: "%.6f", springDuration)
+        // CASpringAnimation. Spring duration HARDCODED at 0.8s = matches the iOS
+        // slide-to-unlock gesture (8/10 of a second). Apple uses 0.8 across all
+        // their wallpaper samples — it's the "right" duration for the gesture.
+        let springDuration = "0.8"
         let transitionElements = (0..<frameCount).map { i in
             """
                   <LKStateTransitionElement targetId="\(videoLayerId)_frame_\(i)" key="zPosition">
-                    <animation type="CASpringAnimation" damping="50" mass="2" stiffness="300" velocity="0" duration="\(springDurationStr)" fillMode="backwards" keyPath="zPosition" mica_autorecalculatesDuration="1"/>
+                    <animation type="CASpringAnimation" damping="50" mass="2" stiffness="300" velocity="0" duration="\(springDuration)" fillMode="backwards" keyPath="zPosition" mica_autorecalculatesDuration="1"/>
                   </LKStateTransitionElement>
             """
         }.joined(separator: "\n")
 
+        // Apple's video layer attribute order (left-to-right):
+        // id, name, bounds, position, zPosition="undefined", opacity, transform.rotation.*,
+        // transform, cornerRadius, allowsEdgeAntialiasing, allowsGroupOpacity, contentsFormat,
+        // cornerCurve, then the caplay* attributes.
         let videoAttrs = """
         caplayKind="video" caplayFrameCount="\(frameCount)" caplayFPS="\(fps)" caplayDuration="\(durationStr)" caplayAutoReverses="\(autoReverses ? 1 : 0)" caplayFramePrefix="\(escapeXMLAttr(framePrefix))" caplayFrameExtension="\(escapeXMLAttr(normalizedExt))" caplaySyncWWithState="\(syncWithState ? 1 : 0)"
         """
@@ -142,11 +164,11 @@ enum TendiesTemplate {
         return """
         <?xml version="1.0" encoding="UTF-8"?>
         <caml xmlns="http://www.apple.com/CoreAnimation/1.0">
-          <CALayer id="__capRootLayer__" name="CAPlayground Root Layer" allowsEdgeAntialiasing="1" allowsGroupOpacity="1" bounds="0 0 \(width) \(height)" contentsFormat="RGBA8" cornerCurve="circular" geometryFlipped="0" opacity="1" position="\(cx) \(cy)" transform="rotate(0deg) rotate(0deg, 0, 1, 0) rotate(0deg, 1, 0, 0)">
+          <CALayer id="__capRootLayer__" name="CAPlayground Root Layer" bounds="0 0 \(width) \(height)" position="\(cx) \(cy)" zPosition="undefined" geometryFlipped="0" opacity="1" transform.rotation.z="0" transform.rotation.x="0" transform.rotation.y="0" transform="rotate(0deg) rotate(0deg, 0, 1, 0) rotate(0deg, 1, 0, 0)" allowsEdgeAntialiasing="1" allowsGroupOpacity="1" contentsFormat="RGBA8" cornerCurve="circular">
             <sublayers>
-              <CALayer id="rootInner" name="Root Layer" allowsEdgeAntialiasing="1" allowsGroupOpacity="1" bounds="0 0 \(width) \(height)" contentsFormat="RGBA8" cornerCurve="circular" geometryFlipped="0" opacity="1" position="\(cx) \(cy)" transform="rotate(0deg) rotate(0deg, 0, 1, 0) rotate(0deg, 1, 0, 0)">
+              <CALayer id="rootInner" name="Root Layer" bounds="0 0 \(width) \(height)" position="\(cx) \(cy)" zPosition="undefined" geometryFlipped="0" opacity="1" transform.rotation.z="0" transform.rotation.x="0" transform.rotation.y="0" transform="rotate(0deg) rotate(0deg, 0, 1, 0) rotate(0deg, 1, 0, 0)" allowsEdgeAntialiasing="1" allowsGroupOpacity="1" contentsFormat="RGBA8" cornerCurve="circular">
                 <sublayers>
-                  <CALayer id="\(videoLayerId)" name="\(escapeXML(layerName))" allowsEdgeAntialiasing="1" allowsGroupOpacity="1" bounds="\(videoBoundsStr)" contentsFormat="RGBA8" cornerCurve="circular" cornerRadius="0" opacity="1" position="\(cx) \(cy)" transform="rotate(0deg) rotate(0deg, 0, 1, 0) rotate(0deg, 1, 0, 0)" \(videoAttrs)>
+                  <CALayer id="\(videoLayerId)" name="\(escapeXML(videoLayerName))" bounds="\(videoBoundsStr)" position="\(cx) \(cy)" zPosition="undefined" opacity="1" transform.rotation.z="0" transform.rotation.x="0" transform.rotation.y="0" transform="rotate(0deg) rotate(0deg, 0, 1, 0) rotate(0deg, 1, 0, 0)" cornerRadius="0" allowsEdgeAntialiasing="1" allowsGroupOpacity="1" contentsFormat="RGBA8" cornerCurve="circular" \(videoAttrs)>
                     <sublayers>
         \(frameSublayers)            </sublayers>
                   </CALayer>
@@ -154,9 +176,9 @@ enum TendiesTemplate {
               </CALayer>
             </sublayers>
             <states>
-              <LKState name="Locked"><elements></elements></LKState>
-              <LKState name="Unlock"><elements></elements></LKState>
-              <LKState name="Sleep"><elements></elements></LKState>
+              <LKState name="Locked"><elements/></LKState>
+              <LKState name="Unlock"><elements/></LKState>
+              <LKState name="Sleep"><elements/></LKState>
             </states>
             <stateTransitions>
               <LKStateTransition fromState="*" toState="Unlock">
@@ -192,51 +214,6 @@ enum TendiesTemplate {
             </stateTransitions>
           </CALayer>
         </caml>
-        """
-    }
-
-    private static func standardStateBlock() -> String {
-        return """
-            <states>
-              <LKState name="Locked">
-        \t<elements>
-        \t</elements>
-              </LKState>
-              <LKState name="Unlock">
-        \t<elements>
-        \t</elements>
-              </LKState>
-              <LKState name="Sleep">
-        \t<elements>
-        \t</elements>
-              </LKState>
-            </states>
-            <stateTransitions>
-              <LKStateTransition fromState="*" toState="Unlock">
-        \t<elements>
-        \t</elements>
-              </LKStateTransition>
-              <LKStateTransition fromState="Unlock" toState="*">
-        \t<elements>
-        \t</elements>
-              </LKStateTransition>
-              <LKStateTransition fromState="*" toState="Locked">
-        \t<elements>
-        \t</elements>
-              </LKStateTransition>
-              <LKStateTransition fromState="Locked" toState="*">
-        \t<elements>
-        \t</elements>
-              </LKStateTransition>
-              <LKStateTransition fromState="*" toState="Sleep">
-        \t<elements>
-        \t</elements>
-              </LKStateTransition>
-              <LKStateTransition fromState="Sleep" toState="*">
-        \t<elements>
-        \t</elements>
-              </LKStateTransition>
-            </stateTransitions>
         """
     }
 
@@ -260,21 +237,27 @@ enum TendiesTemplate {
         \t\t\t<dict>
         \t\t\t\t<key>backgroundAnimationFileName</key>
         \t\t\t\t<string>\(escapeXML(backgroundCAName))</string>
-        \t\t\t\t<key>floatingAnimationFileName</key>
+        \t\t\t\t<key>floatingAnimationFileNameKey</key>
         \t\t\t\t<string>\(escapeXML(floatingCAName))</string>
         \t\t\t\t<key>foregroundAnimationFileName</key>
         \t\t\t\t<string>\(escapeXML(foregroundCAName))</string>
+        \t\t\t\t<key>name</key>
+        \t\t\t\t<string>\(escapeXML(name))</string>
+        \t\t\t\t<key>identifier</key>
+        \t\t\t\t<integer>7400</integer>
+        \t\t\t\t<key>type</key>
+        \t\t\t\t<string>LayeredAnimation</string>
         \t\t\t</dict>
         \t\t</dict>
         \t</dict>
         \t<key>family</key>
-        \t<integer>1</integer>
+        \t<string>WWDC22</string>
         \t<key>logicalScreenClass</key>
-        \t<string>iphone3x-844h</string>
+        \t<string>390w-844h@3x~iphone</string>
         \t<key>appearanceAware</key>
         \t<false/>
         \t<key>identifier</key>
-        \t<string>\(escapeXML(identifier))</string>
+        \t<integer>7400</integer>
         \t<key>version</key>
         \t<integer>1</integer>
         \t<key>name</key>
