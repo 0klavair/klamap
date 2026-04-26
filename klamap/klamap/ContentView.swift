@@ -855,13 +855,65 @@ fileprivate func mapStyleForLive(_ style: WallpaperMakerView.LiveMapStyle = .sta
 // MARK: - Root
 struct RootView: View {
     var body: some View {
-        NavigationStack { WallpaperMakerView() }
+        if #available(iOS 17, *) {
+            NavigationStack { WallpaperMakerView() }
+        } else {
+            // iOS 16 fallback: the main editor relies on SwiftUI's iOS 17 Map API.
+            // Until the MKMapView wrapper backport ships, iOS 16 sees this screen.
+            iOS16UnsupportedView()
+        }
     }
 }
 
 // Entry view expected by previews or App entry point
 struct ContentView: View {
     var body: some View { RootView() }
+}
+
+/// Plain explanation screen for iOS 16 devices. The main editor uses SwiftUI
+/// Map(position:), MapCamera, onMapCameraChange and MapPolyline — all iOS 17+.
+/// Backporting requires re-implementing the map view as a UIViewRepresentable
+/// around MKMapView (~1-2 days of work, planned but not yet done).
+struct iOS16UnsupportedView: View {
+    var body: some View {
+        ZStack {
+            LinearGradient(
+                colors: [Color(red: 0.10, green: 0.10, blue: 0.18),
+                         Color(red: 0.06, green: 0.06, blue: 0.12)],
+                startPoint: .top, endPoint: .bottom
+            )
+            .ignoresSafeArea()
+
+            VStack(spacing: 24) {
+                Image(systemName: "map.circle.fill")
+                    .font(.system(size: 96))
+                    .foregroundStyle(.white.opacity(0.85))
+
+                Text("klamap")
+                    .font(.largeTitle.bold())
+                    .foregroundStyle(.white)
+
+                VStack(spacing: 8) {
+                    Text("iOS 17 required")
+                        .font(.title3.weight(.medium))
+                        .foregroundStyle(.white.opacity(0.95))
+
+                    Text("Cet appareil tourne sur iOS 16. L'éditeur principal de klamap utilise les nouvelles API SwiftUI Map d'iOS 17. Le portage iOS 16 est prévu mais pas encore livré.")
+                        .font(.callout)
+                        .foregroundStyle(.white.opacity(0.7))
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 24)
+                }
+
+                Text("Update to iOS 17+ if your device supports it,\nor wait for the iOS 16 backport.")
+                    .font(.footnote)
+                    .foregroundStyle(.white.opacity(0.5))
+                    .multilineTextAlignment(.center)
+                    .padding(.top, 8)
+            }
+            .padding()
+        }
+    }
 }
 
 // MARK: - Location helper
@@ -886,6 +938,7 @@ final class LocationManager: NSObject, ObservableObject, CLLocationManagerDelega
 }
 
 // MARK: - Wallpaper maker (unique screen)
+@available(iOS 17, *)
 struct WallpaperMakerView: View {
     let L = Localization.current
     
