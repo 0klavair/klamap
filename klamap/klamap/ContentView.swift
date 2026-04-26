@@ -962,6 +962,13 @@ final class LocationManager: NSObject, ObservableObject, CLLocationManagerDelega
     }
 }
 
+/// Reference-type box for capturing a CGImage out of an async closure.
+/// Used by exportImageClean to grab the single frame from ContinuousRenderEngine.
+@MainActor
+fileprivate final class CGImageBox {
+    var value: CGImage?
+}
+
 // MARK: - Wallpaper maker (unique screen)
 @available(iOS 17, *)
 struct WallpaperMakerView: View {
@@ -4773,7 +4780,49 @@ struct WallpaperMakerView: View {
         let px = exportPixelSize()
         progressLabel = L.renderingImage
 
-        guard let baseCG = await renderMapImage(size: px, t: previewProgress) else {
+        // Single-frame render via ContinuousRenderEngine when available — same
+        // pipeline as video/tendies, no race against tile-load on hybrid 3D.
+        // Falls back to legacy MKMapSnapshotter via renderMapImage if continuous
+        // engine is disabled in Settings.
+        let baseCG: CGImage?
+        if useContinuousEngine {
+            await ensureRouteReady()
+            let p = self.pathPoint(previewProgress)
+            let state = CameraState(coord: p.coord, distance: p.pose.distance, pitch: p.pose.pitch, heading: p.pose.heading)
+            let style: SnapshotConfig.Style
+            switch liveStyle {
+            case .standard: style = .standard
+            case .muted:    style = .muted
+            case .hybrid:   style = .hybrid
+            }
+            let config = SnapshotConfig(
+                style: style,
+                showPOI: showPOI,
+                hideRoadLabels: hideRoadLabels,
+                realisticElevationWhenPitched: true
+            )
+            let polylineLatLons: [Double]? = (useRoutePath && !routeCoordinates.isEmpty)
+                ? routeCoordinates.flatMap { [$0.latitude, $0.longitude] }
+                : nil
+
+            // ContinuousRenderEngine takes an array of states and a frame callback.
+            // For a single image, give it one state; capture the CGImage in the callback.
+            let captured = CGImageBox()
+            await ContinuousRenderEngine.shared.startRender(
+                states: [state],
+                captureSize: px,
+                config: config,
+                polylineLatLons: polylineLatLons,
+                filter: selectedFilter,
+                cancel: { self.cancelRequested },
+                onFrame: { _, cg in captured.value = cg },
+                onProgress: { _, _ in }
+            )
+            baseCG = captured.value
+        } else {
+            baseCG = await renderMapImage(size: px, t: previewProgress)
+        }
+        guard let baseCG = baseCG else {
             errorText = L.renderError
             return
         }
