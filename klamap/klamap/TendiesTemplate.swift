@@ -67,7 +67,12 @@ enum TendiesTemplate {
     }
 
     /// Generates the Floating .ca main.caml that contains a video layer with frame keyframes.
-    /// The video layer references frames stored in `assets/<framePrefix><i><frameExt>`.
+    /// Replicates Apple's WWDC22 wallpaper structure exactly:
+    /// - One CALayer sublayer PER FRAME, each with its own zPosition (triangular: 0, -1, -3, -6, -10…)
+    /// - Animation driven by stateTransitions on zPosition with CASpringAnimation
+    /// - This is what makes caplaySyncWWithState actually work — the slide-to-unlock
+    ///   gesture interpolates the spring animation, scrubbing through the frames
+    ///   by changing which one is on top of the z-stack
     static func videoMainCAML(
         layerName: String,
         width: Int,
@@ -84,69 +89,98 @@ enum TendiesTemplate {
         let cy = height / 2
         let normalizedExt = frameExt.hasPrefix(".") ? frameExt : ".\(frameExt)"
         let durationStr = String(format: "%.6f", duration)
-        let stateBlock = standardStateBlock()
+        let videoLayerId = "videoLayer"
 
-        let firstFrame = "assets/\(framePrefix)0\(normalizedExt)"
+        // Apple uses slightly larger video bounds than the wallpaper (≈ 1.017× extra
+        // for parallax headroom) and offsets position by +3pt in both axes.
+        let videoBoundsW = Double(width) * 1.0174
+        let videoBoundsH = Double(height) * 1.0174
+        let videoBoundsStr = String(format: "0 0 %.10f %.10f", videoBoundsW, videoBoundsH)
+        let videoPosX = cx + 3
+        let videoPosY = cy + 7
 
-        var contentsBlock = ""
-        var animationsBlock = ""
+        // One sublayer per frame. zPosition follows triangular progression so the
+        // unlock spring has something to interpolate between.
+        var frameSublayers = ""
+        for i in 0..<frameCount {
+            let zPos = -(i * (i + 1)) / 2  // 0, -1, -3, -6, -10, -15, -21, …
+            let path = "assets/\(framePrefix)\(i)\(normalizedExt)"
+            frameSublayers += """
+                      <CALayer id="\(videoLayerId)_frame_\(i)" name="\(videoLayerId)_frame_\(i)" allowsEdgeAntialiasing="1" allowsGroupOpacity="1" bounds="\(videoBoundsStr)" contentsFormat="RGBA8" cornerCurve="circular" opacity="1" position="\(videoPosX) \(videoPosY)" zPosition="\(zPos)">
+                        <contents>
+                          <CGImage src="\(escapeXML(path))"/>
+                        </contents>
+                      </CALayer>
 
-        if frameCount > 0 {
-            contentsBlock = """
-                  <contents type="CGImage" src="\(escapeXML(firstFrame))"/>
             """
         }
 
-        if frameCount > 1 && !syncWithState {
-            var values = ""
-            for i in 0..<frameCount {
-                let path = "assets/\(framePrefix)\(i)\(normalizedExt)"
-                values += "            <CGImage src=\"\(escapeXML(path))\"/>\n"
-            }
-            animationsBlock = """
-                  <animations>
-                    <animation type="CAKeyframeAnimation" calculationMode="linear" keyPath="contents" beginTime="1e-100" duration="\(durationStr)" removedOnCompletion="0" repeatCount="inf" repeatDuration="0" speed="1" timeOffset="0" autoreverses="\(autoReverses ? 1 : 0)">
-                      <values>
-            \(values)          </values>
-                    </animation>
-                  </animations>
+        // State transitions: each frame sublayer's zPosition gets animated with a
+        // CASpringAnimation when the lock-screen state changes. The slide gesture
+        // drives the spring's progress, scrubbing through frames.
+        let transitionElements = (0..<frameCount).map { i in
             """
-        } else if frameCount > 1 && syncWithState {
-            // Sync mode: contents is driven by a single keyframe array, but state machine
-            // re-targets the time. iOS interprets caplaySyncWWithState=1 to scrub the animation
-            // based on lock-screen unlock progress.
-            var values = ""
-            for i in 0..<frameCount {
-                let path = "assets/\(framePrefix)\(i)\(normalizedExt)"
-                values += "            <CGImage src=\"\(escapeXML(path))\"/>\n"
-            }
-            animationsBlock = """
-                  <animations>
-                    <animation type="CAKeyframeAnimation" calculationMode="linear" keyPath="contents" beginTime="1e-100" duration="\(durationStr)" removedOnCompletion="0" repeatCount="inf" repeatDuration="0" speed="1" timeOffset="0" autoreverses="\(autoReverses ? 1 : 0)">
-                      <values>
-            \(values)          </values>
-                    </animation>
-                  </animations>
+                  <LKStateTransitionElement targetId="\(videoLayerId)_frame_\(i)" key="zPosition">
+                    <animation type="CASpringAnimation" damping="50" mass="2" stiffness="300" velocity="0" duration="0.8" fillMode="backwards" keyPath="zPosition" mica_autorecalculatesDuration="1"/>
+                  </LKStateTransitionElement>
             """
-        }
+        }.joined(separator: "\n")
 
         let videoAttrs = """
-        caplayKind="video" caplayFrameCount="\(frameCount)" caplayFPS="\(fps)" caplayDuration="\(durationStr)" caplayAutoReverses="\(autoReverses ? 1 : 0)" caplayFramePrefix="\(escapeXMLAttr(framePrefix))" caplayFrameExtension="\(escapeXMLAttr(normalizedExt))" caplaySyncWWithState="\(syncWithState ? 1 : 0)" caplaySyncStateFrameMode="{}"
+        caplayKind="video" caplayFrameCount="\(frameCount)" caplayFPS="\(fps)" caplayDuration="\(durationStr)" caplayAutoReverses="\(autoReverses ? 1 : 0)" caplayFramePrefix="\(escapeXMLAttr(framePrefix))" caplayFrameExtension="\(escapeXMLAttr(normalizedExt))" caplaySyncWWithState="\(syncWithState ? 1 : 0)"
         """
 
         return """
         <?xml version="1.0" encoding="UTF-8"?>
-
         <caml xmlns="http://www.apple.com/CoreAnimation/1.0">
-          <CALayer allowsEdgeAntialiasing="1" allowsGroupOpacity="1" bounds="0 0 \(width) \(height)" contentsFormat="RGBA8" cornerCurve="circular" geometryFlipped="1" hidden="0" name="Root Layer" position="\(cx) \(cy)">
+          <CALayer id="__capRootLayer__" name="CAPlayground Root Layer" allowsEdgeAntialiasing="1" allowsGroupOpacity="1" bounds="0 0 \(width) \(height)" contentsFormat="RGBA8" cornerCurve="circular" geometryFlipped="0" opacity="1" position="\(cx) \(cy)" transform="rotate(0deg) rotate(0deg, 0, 1, 0) rotate(0deg, 1, 0, 0)">
             <sublayers>
-              <CALayer id="videoLayer" allowsEdgeAntialiasing="1" allowsGroupOpacity="1" bounds="0 0 \(width) \(height)" contentsFormat="RGBA8" cornerCurve="circular" name="\(escapeXML(layerName))" position="\(cx) \(cy)" \(videoAttrs)>
-        \(contentsBlock)
-        \(animationsBlock)
+              <CALayer id="rootInner" name="Root Layer" allowsEdgeAntialiasing="1" allowsGroupOpacity="1" bounds="0 0 \(width) \(height)" contentsFormat="RGBA8" cornerCurve="circular" geometryFlipped="0" opacity="1" position="\(cx) \(cy)" transform="rotate(0deg) rotate(0deg, 0, 1, 0) rotate(0deg, 1, 0, 0)">
+                <sublayers>
+                  <CALayer id="\(videoLayerId)" name="\(escapeXML(layerName))" allowsEdgeAntialiasing="1" allowsGroupOpacity="1" bounds="\(videoBoundsStr)" contentsFormat="RGBA8" cornerCurve="circular" cornerRadius="0" opacity="1" position="\(cx) \(cy)" transform="rotate(0deg) rotate(0deg, 0, 1, 0) rotate(0deg, 1, 0, 0)" \(videoAttrs)>
+                    <sublayers>
+        \(frameSublayers)            </sublayers>
+                  </CALayer>
+                </sublayers>
               </CALayer>
             </sublayers>
-            <scriptComponents/>
-        \(stateBlock)
+            <states>
+              <LKState name="Locked"><elements></elements></LKState>
+              <LKState name="Unlock"><elements></elements></LKState>
+              <LKState name="Sleep"><elements></elements></LKState>
+            </states>
+            <stateTransitions>
+              <LKStateTransition fromState="*" toState="Unlock">
+                <elements>
+        \(transitionElements)
+                </elements>
+              </LKStateTransition>
+              <LKStateTransition fromState="Unlock" toState="*">
+                <elements>
+        \(transitionElements)
+                </elements>
+              </LKStateTransition>
+              <LKStateTransition fromState="*" toState="Locked">
+                <elements>
+        \(transitionElements)
+                </elements>
+              </LKStateTransition>
+              <LKStateTransition fromState="Locked" toState="*">
+                <elements>
+        \(transitionElements)
+                </elements>
+              </LKStateTransition>
+              <LKStateTransition fromState="*" toState="Sleep">
+                <elements>
+        \(transitionElements)
+                </elements>
+              </LKStateTransition>
+              <LKStateTransition fromState="Sleep" toState="*">
+                <elements>
+        \(transitionElements)
+                </elements>
+              </LKStateTransition>
+            </stateTransitions>
           </CALayer>
         </caml>
         """

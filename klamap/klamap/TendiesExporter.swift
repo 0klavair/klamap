@@ -82,7 +82,11 @@ enum TendiesExporter {
         }
 
         let frameCount = frameURLs.count
-        let framePrefix = "frame_"
+        // Apple's WWDC sample uses a consistent UUID for every frame's filename:
+        // export_<UUID>_0.jpg, export_<UUID>_1.jpg, etc. — must match the
+        // caplayFramePrefix attribute in the CAML.
+        let frameUUID = UUID().uuidString
+        let framePrefix = "export_\(frameUUID)_"
         let frameExt = ".jpg"
 
         // Replace Floating .ca contents.

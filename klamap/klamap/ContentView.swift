@@ -3916,7 +3916,7 @@ struct WallpaperMakerView: View {
                     let cg = RenderFilter.apply(selectedFilter, to: raw)
                     let name = String(format: "%0*d.jpg", digits, idx)
                     let url = frameDir.appendingPathComponent(name)
-                    try? TendiesExporter.writeCGImageAsJPEG(cg, to: url, quality: 0.9)
+                    try? TendiesExporter.writeCGImageAsJPEG(cg, to: url, quality: 0.75)
                 }
                 let done = idx + 1
                 renderProgress = Double(done) / Double(totalFrames)
@@ -3942,7 +3942,7 @@ struct WallpaperMakerView: View {
                 onFrame: { idx, cg in
                     let name = String(format: "%0*d.jpg", digits, idx)
                     let url = frameDir.appendingPathComponent(name)
-                    try? TendiesExporter.writeCGImageAsJPEG(cg, to: url, quality: 0.9)
+                    try? TendiesExporter.writeCGImageAsJPEG(cg, to: url, quality: 0.75)
                 },
                 onProgress: { done, total in
                     self.renderProgress = Double(done) / Double(total)
@@ -3980,7 +3980,10 @@ struct WallpaperMakerView: View {
             duration: duration,
             autoReverses: false,
             syncWithState: true,
-            jpegQuality: 0.9
+            // Apple's WWDC sample uses ~0.7 quality JPEGs (~40 KB per frame at low
+            // res). Higher quality bloats the .tendies without visual benefit since
+            // iOS rescales heavily for the wallpaper render anyway.
+            jpegQuality: 0.75
         )
 
         do {
