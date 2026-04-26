@@ -136,28 +136,17 @@ enum TendiesExporter {
             encoding: .utf8
         )
 
-        // Background and Foreground: keep transparent / empty so the video shows through.
-        for ca in [caFolders.background, caFolders.foreground] {
-            let layerName = ca.lastPathComponent.contains("Background") ? "Background" : "Foreground"
-            let emptyCAML = TendiesTemplate.emptyMainCAML(
-                layerName: layerName,
-                width: params.width,
-                height: params.height
-            )
-            try emptyCAML.write(
-                to: ca.appendingPathComponent("main.caml"),
-                atomically: true,
-                encoding: .utf8
-            )
-            // Clear assets too — we don't want stale template imagery layered on top.
-            let assetsDir = ca.appendingPathComponent("assets", isDirectory: true)
-            try resetDirectory(at: assetsDir)
-            try TendiesTemplate.assetManifestCAML(framePaths: []).write(
-                to: ca.appendingPathComponent("assetManifest.caml"),
-                atomically: true,
-                encoding: .utf8
-            )
-        }
+        // Background and Foreground: PRESERVE the template's main.caml exactly
+        // as-is. The template (extracted from CAPlayground's known-good tendies)
+        // ships with carefully-structured CAML that includes a Root_Layer.js
+        // script reference and the right state machine attributes. Overwriting
+        // with our minimal "empty" CAML was likely contributing to iOS PosterKit
+        // failing to render the wallpaper (black screen). Touching nothing here
+        // means iOS sees the same Background/Foreground layout that Apple ships.
+        //
+        // We also leave the template's assets/Root_Layer.js intact (no
+        // resetDirectory). The Floating layer is the only thing we replace —
+        // that's where our video frames live.
 
         // Re-zip
         onProgress(0.90, "Packaging .tendies…")
