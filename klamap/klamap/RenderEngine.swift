@@ -58,22 +58,45 @@ enum RenderEngine {
         let total = states.count
         guard total > 0 else { return }
 
-        // Preheat tiles around start, mid, end. Cheap small snapshots that warm
-        // MapKit's tile + 3D-mesh cache so the first parallel batch doesn't all
-        // hit cold caches and produce "void" frames.
-        let preheatStates: [CameraState] = total == 1
-            ? [states[0]]
-            : [states[0], states[total / 2], states[total - 1]]
-        for s in preheatStates {
+        // Coarse preheat: 5 evenly-spaced low-res snapshots warm Apple's tile cache
+        // for the rough route region. Cheap (~1-2 s total).
+        let coarseIndices: [Int] = total == 1 ? [0]
+            : (0..<5).map { min(total - 1, Int(round(Double($0) * Double(total - 1) / 4.0))) }
+        for i in coarseIndices {
+            let s = states[i]
             _ = await snapshotPure(
                 lat: s.lat, lon: s.lon,
                 distance: s.distance, pitch: s.pitch, heading: s.heading,
-                width: max(64, width / 4), height: max(64, height / 4),
+                width: max(128, width / 2), height: max(128, height / 2),
                 style: config.style, showPOI: config.showPOI,
                 hideRoadLabels: config.hideRoadLabels,
                 realisticElevation: config.realisticElevationWhenPitched
             )
         }
+
+        // Targeted preheat for the END of the route at FULL resolution. This is
+        // where we observed the worst hybrid + realistic 3D glitches: destination
+        // tiles were cold, MKMapSnapshotter returned before the 3D mesh loaded,
+        // and frames showed flat satellite without the buildings. By snapping the
+        // last few frames sequentially before the parallel batch, the destination
+        // mesh tiles are loaded and cached for the real run.
+        let needsEndWarmup = (config.style == .hybrid && config.realisticElevationWhenPitched)
+        if needsEndWarmup && total > 10 {
+            let endCount = max(3, min(8, total / 20))
+            let warmStart = total - endCount
+            for i in warmStart..<total {
+                let s = states[i]
+                _ = await snapshotPure(
+                    lat: s.lat, lon: s.lon,
+                    distance: s.distance, pitch: s.pitch, heading: s.heading,
+                    width: width, height: height,
+                    style: config.style, showPOI: config.showPOI,
+                    hideRoadLabels: config.hideRoadLabels,
+                    realisticElevation: config.realisticElevationWhenPitched
+                )
+            }
+        }
+
         if cancel() { return }
 
         // Drive a TaskGroup with a sliding window of N concurrent snapshots.

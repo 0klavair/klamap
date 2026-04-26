@@ -190,6 +190,7 @@ protocol LocalizationStrings {
     // Presentation mode (full-screen map + crosshair)
     var presentationMode: String { get }
     var clear: String { get }
+    var preset: String { get }
 
     var cancelRender: String { get }
     var cancelling: String { get }
@@ -512,6 +513,7 @@ struct FrenchStrings: LocalizationStrings {
 
     let presentationMode = "Mode présentation"
     let clear = "Effacer"
+    let preset = "Préréglage"
 }
 
 struct EnglishStrings: LocalizationStrings {
@@ -750,6 +752,7 @@ struct EnglishStrings: LocalizationStrings {
 
     let presentationMode = "Presentation mode"
     let clear = "Clear"
+    let preset = "Preset"
 }
 
 // MARK: - Missing helpers & placeholders added for buildability
@@ -1040,12 +1043,13 @@ struct WallpaperMakerView: View {
                     return
                 }
 
-                // Paramètres par défaut pour export séquence
+                // Force PNG output for the sequence (the only format that makes sense
+                // for an image sequence ZIP). Do NOT reset oversample / fps / bitrate —
+                // those are user-controlled choices and silently overwriting them was
+                // confusing ("oversample doesn't work" turned out to be this reset
+                // firing whenever the user touched the ZIP button before another export).
                 imageFormatEnum = .png
-                videoFormatEnum = .h264
-                oversample = 1.0
                 pngCompressionLevel = 1
-                fps = 60
 
                 // Export de séquence d'images
                 capPlaygroundFileURL = nil
@@ -1389,6 +1393,110 @@ struct WallpaperMakerView: View {
         case muted
         case hybrid
         var id: String { rawValue }
+    }
+
+    /// One-click camera + style + timing combinations the user can apply, then tweak.
+    enum CameraPreset: String, CaseIterable, Identifiable {
+        case cinematicDrive
+        case aerialTour
+        case streetLevel
+        case topDown
+        case documentary
+        case realistic3D
+
+        var id: String { rawValue }
+
+        var displayName: String {
+            switch self {
+            case .cinematicDrive: return "Cinematic Drive"
+            case .aerialTour:     return "Aerial Tour"
+            case .streetLevel:    return "Street Level"
+            case .topDown:        return "Top-Down"
+            case .documentary:    return "Documentary"
+            case .realistic3D:    return "Realistic 3D"
+            }
+        }
+    }
+
+    @State private var selectedPreset: CameraPreset? = nil
+
+    /// Apply preset values to the relevant state vars. Distance/heading are left
+    /// to the user's current map view (the preset doesn't yank the camera off the
+    /// area they were exploring).
+    private func applyCameraPreset(_ preset: CameraPreset) {
+        switch preset {
+        case .cinematicDrive:
+            pitchDeg = 65
+            liveStyle = .hybrid
+            useRoutePath = true
+            keepCentered = true
+            splineEnabled = false
+            seconds = 6
+            fps = 60
+            easing = .easeInOut
+            hideRoadLabels = true
+            showPOI = false
+            recomputeRouteIfNeeded()
+        case .aerialTour:
+            pitchDeg = 30
+            liveStyle = .hybrid
+            useRoutePath = false
+            keepCentered = true
+            splineEnabled = true
+            splineCurvature = 0.35
+            seconds = 8
+            fps = 60
+            easing = .easeInOut
+            hideRoadLabels = true
+            showPOI = false
+        case .streetLevel:
+            pitchDeg = 80
+            liveStyle = .hybrid
+            useRoutePath = true
+            keepCentered = true
+            splineEnabled = false
+            seconds = 6
+            fps = 60
+            easing = .easeInOut
+            hideRoadLabels = true
+            showPOI = false
+            recomputeRouteIfNeeded()
+        case .topDown:
+            pitchDeg = 0
+            liveStyle = .standard
+            useRoutePath = false
+            keepCentered = true
+            splineEnabled = false
+            seconds = 4
+            fps = 60
+            easing = .easeInOut
+            hideRoadLabels = true
+            showPOI = false
+        case .documentary:
+            pitchDeg = 35
+            liveStyle = .standard
+            useRoutePath = false
+            keepCentered = false
+            splineEnabled = true
+            splineCurvature = 0.20
+            seconds = 6
+            fps = 60
+            easing = .easeInOut
+            hideRoadLabels = false
+            showPOI = true
+        case .realistic3D:
+            pitchDeg = 55
+            liveStyle = .hybrid
+            useRoutePath = false
+            keepCentered = true
+            splineEnabled = false
+            seconds = 8
+            fps = 60
+            easing = .easeInOut
+            hideRoadLabels = true
+            showPOI = false
+        }
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
     }
     @State private var liveStyle: LiveMapStyle = .standard
     @State private var showPOI: Bool = false
@@ -2473,6 +2581,38 @@ struct WallpaperMakerView: View {
 
     private var cameraPathSection: some View {
         Section(L.cameraAndTracking) {
+            // Camera preset picker — one tap configures pitch / style / route /
+            // duration / labels for a known-good cinematic combo. User can still
+            // tweak everything afterwards.
+            VStack(alignment: .leading, spacing: 6) {
+                Text(L.preset)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(CameraPreset.allCases) { p in
+                            Button {
+                                hapticButtonTap(style: .light)
+                                selectedPreset = p
+                                applyCameraPreset(p)
+                            } label: {
+                                Text(p.displayName)
+                                    .font(.footnote.weight(selectedPreset == p ? .semibold : .regular))
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 8)
+                                    .background(
+                                        Capsule().fill(selectedPreset == p ? Color.accentColor.opacity(0.25) : Color.gray.opacity(0.12))
+                                    )
+                                    .foregroundStyle(.primary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+            .padding(.bottom, 4)
+
             VStack(alignment: .leading) {
                 HStack {
                     Text(L.viewAngle)
@@ -2480,7 +2620,7 @@ struct WallpaperMakerView: View {
                     Text("\(Int(pitchDeg))°")
                         .foregroundStyle(.secondary)
                 }
-                Slider(value: $pitchDeg, in: 0...70, step: 1)
+                Slider(value: $pitchDeg, in: 0...85, step: 1)
                     .onChange(of: pitchDeg) { _, _ in
                         hapticSliderChange()
                     }
