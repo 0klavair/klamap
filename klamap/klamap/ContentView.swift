@@ -217,6 +217,9 @@ protocol LocalizationStrings {
     var shareLastLog: String { get }
     var stabilizeEnd: String { get }
     var previewModeRender: String { get }
+    var tendiesQualityTitle: String { get }
+    var tendiesQuality: String { get }
+    var tendiesQualityFooter: String { get }
 
     var cancelRender: String { get }
     var cancelling: String { get }
@@ -563,6 +566,9 @@ struct FrenchStrings: LocalizationStrings {
     let shareLastLog = "Partager le dernier log"
     let stabilizeEnd = "Stabiliser la fin (recommandé)"
     let previewModeRender = "Rendu identique à la preview"
+    let tendiesQualityTitle = "Qualité Tendies"
+    let tendiesQuality = "Qualité JPEG"
+    let tendiesQualityFooter = "Plus haut = meilleure qualité visuelle mais fichier plus gros. 95% par défaut, max 100%."
 }
 
 struct EnglishStrings: LocalizationStrings {
@@ -825,6 +831,9 @@ struct EnglishStrings: LocalizationStrings {
     let shareLastLog = "Share last log"
     let stabilizeEnd = "Stabilize end (recommended)"
     let previewModeRender = "Preview-quality render"
+    let tendiesQualityTitle = "Tendies quality"
+    let tendiesQuality = "JPEG quality"
+    let tendiesQualityFooter = "Higher = better visual quality but larger file. 95% default, 100% max."
 }
 
 // MARK: - Missing helpers & placeholders added for buildability
@@ -1567,6 +1576,10 @@ struct WallpaperMakerView: View {
     /// User explicitly asked: "I want it to work like the preview, the preview
     /// is perfect" — that's exactly what this toggle delivers. Default ON.
     @AppStorage("previewModeRender") private var previewModeRender: Bool = true
+
+    /// JPEG quality for tendies frames. Default 0.95 = max quality (user explicitly
+    /// asked: "Je veux vraiment une grosse qualité"). Range 0.5..1.0.
+    @AppStorage("tendiesJpegQuality") private var tendiesJpegQuality: Double = 0.95
 
     /// When on, every pathPoint() result is written to a CSV log under tmp/.
     /// Lets the user (or me) see the exact camera trajectory, helps diagnose
@@ -2441,6 +2454,17 @@ struct WallpaperMakerView: View {
                                 .font(.footnote)
                         }
                     }
+                }
+
+                Section(header: Text(L.tendiesQualityTitle), footer: Text(L.tendiesQualityFooter)) {
+                    HStack {
+                        Label(L.tendiesQuality, systemImage: "photo.stack")
+                        Spacer()
+                        Text(String(format: "%.0f%%", tendiesJpegQuality * 100))
+                            .foregroundStyle(.secondary)
+                            .font(.footnote.monospacedDigit())
+                    }
+                    Slider(value: $tendiesJpegQuality, in: 0.5...1.0, step: 0.05)
                 }
 
                 Section(header: Text(L.debug)) {
@@ -3916,7 +3940,7 @@ struct WallpaperMakerView: View {
                     let cg = RenderFilter.apply(selectedFilter, to: raw)
                     let name = String(format: "%0*d.jpg", digits, idx)
                     let url = frameDir.appendingPathComponent(name)
-                    try? TendiesExporter.writeCGImageAsJPEG(cg, to: url, quality: 0.75)
+                    try? TendiesExporter.writeCGImageAsJPEG(cg, to: url, quality: CGFloat(tendiesJpegQuality))
                 }
                 let done = idx + 1
                 renderProgress = Double(done) / Double(totalFrames)
@@ -3942,7 +3966,7 @@ struct WallpaperMakerView: View {
                 onFrame: { idx, cg in
                     let name = String(format: "%0*d.jpg", digits, idx)
                     let url = frameDir.appendingPathComponent(name)
-                    try? TendiesExporter.writeCGImageAsJPEG(cg, to: url, quality: 0.75)
+                    try? TendiesExporter.writeCGImageAsJPEG(cg, to: url, quality: CGFloat(tendiesJpegQuality))
                 },
                 onProgress: { done, total in
                     self.renderProgress = Double(done) / Double(total)
@@ -3980,10 +4004,10 @@ struct WallpaperMakerView: View {
             duration: duration,
             autoReverses: false,
             syncWithState: true,
-            // Apple's WWDC sample uses ~0.7 quality JPEGs (~40 KB per frame at low
-            // res). Higher quality bloats the .tendies without visual benefit since
-            // iOS rescales heavily for the wallpaper render anyway.
-            jpegQuality: 0.75
+            // User wants maximum quality — they're rendering at high res and want
+            // the best possible output. Configurable via the tendiesJpegQuality
+            // slider in Settings (default 0.95).
+            jpegQuality: CGFloat(tendiesJpegQuality)
         )
 
         do {
