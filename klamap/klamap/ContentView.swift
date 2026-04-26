@@ -217,6 +217,7 @@ protocol LocalizationStrings {
     var shareLastLog: String { get }
     var stabilizeEnd: String { get }
     var previewModeRender: String { get }
+    var continuousEngine: String { get }
     var tendiesQualityTitle: String { get }
     var tendiesQuality: String { get }
     var tendiesQualityFooter: String { get }
@@ -566,6 +567,7 @@ struct FrenchStrings: LocalizationStrings {
     let shareLastLog = "Partager le dernier log"
     let stabilizeEnd = "Stabiliser la fin (recommandé)"
     let previewModeRender = "Rendu identique à la preview"
+    let continuousEngine = "Moteur de rendu continu (recommandé)"
     let tendiesQualityTitle = "Qualité Tendies"
     let tendiesQuality = "Qualité JPEG"
     let tendiesQualityFooter = "Plus haut = meilleure qualité visuelle mais fichier plus gros. 95% par défaut, max 100%."
@@ -831,6 +833,7 @@ struct EnglishStrings: LocalizationStrings {
     let shareLastLog = "Share last log"
     let stabilizeEnd = "Stabilize end (recommended)"
     let previewModeRender = "Preview-quality render"
+    let continuousEngine = "Continuous render engine (recommended)"
     let tendiesQualityTitle = "Tendies quality"
     let tendiesQuality = "JPEG quality"
     let tendiesQualityFooter = "Higher = better visual quality but larger file. 95% default, 100% max."
@@ -974,16 +977,12 @@ struct WallpaperMakerView: View {
         let profT: CGFloat = simulateTraffic ? trafficProfileProgress(clamped) : clamped
 
 
-        // Camera lead: la caméra regarde légèrement plus loin sur la route (effet CarPlay).
-        // On pousse un peu plus quand on suit la route réelle pour bien voir la ligne bleue.
-        // CRITICAL: on TAPER le lead à zéro dans les 15 % finaux pour éviter que la caméra
-        // se "fige" à la fin de route (cameraLead overshoot) puis donne l'impression que la
-        // caméra glitche pendant que la pose continue d'interpoler. Sans tapering, profT 0.94+
-        // bloque tCamera à 1.0 alors que les paramètres caméra continuent de bouger.
-        let baseLead: CGFloat = useRoutePath ? 0.06 : 0.02
-        let leadTaper = max(0, min(1, (1 - profT) / 0.15))
-        let cameraLead = baseLead * leadTaper
-        let tCamera = min(1, profT + cameraLead)
+        // Pas de cameraLead : il créait une discontinuité de vélocité aux 15% finaux
+        // (taper du lead à zéro = changement de dérivée = micro-cut perçu par l'œil,
+        // viole la contrainte "zéro cut" de l'utilisateur). La caméra suit exactement
+        // la position de progression. Si l'effet CarPlay est désiré plus tard, il
+        // faudra l'ajouter sous forme de lead CONSTANT, pas tapered.
+        let tCamera = profT
 
         let a = pointA ?? crosshairCenter ?? CLLocationCoordinate2D(latitude: 48.8566, longitude: 2.3522)
         let b = pointB ?? a
@@ -1565,11 +1564,16 @@ struct WallpaperMakerView: View {
     /// Selected post-processing color filter applied to every exported frame.
     @State private var selectedFilter: RenderFilter = .none
 
-    /// When on, the trajectory's last 10% is trimmed so the video never reaches
-    /// the buggy end-of-route region. The user's clever workaround for the
-    /// trembling that hybrid+realistic 3D mode shows in the last few frames.
-    /// Default ON because the bug is most visible exactly there.
-    @AppStorage("trimEndFrames") private var trimEndFrames: Bool = true
+    /// LEGACY: only used when the continuous engine is OFF. The end-hold approach
+    /// violates the "zero camera cut" constraint (passage abrupt de "en mouvement"
+    /// à "figé" = cut perçu) so the new continuous engine ignores it.
+    @AppStorage("trimEndFrames") private var trimEndFrames: Bool = false
+
+    /// MASTER toggle: when ON (default), all renders use the new continuous-capture
+    /// engine that drives the shared MKMapView via CADisplayLink and captures each
+    /// Vsync. Eliminates the discrete-snapshot race condition that caused the
+    /// hybrid + 3D trembling. See docs/RENDERING.md for the full architecture.
+    @AppStorage("useContinuousEngine") private var useContinuousEngine: Bool = true
 
     /// When on, the export pipeline matches the live preview's behavior: instant
     /// camera updates, minimal Vsync wait, no waiting for tile-load delegates.
@@ -1995,14 +1999,11 @@ struct WallpaperMakerView: View {
         }
     }
 
-    /// Returns how many extra "hold" frames we add at the end of every export.
-    /// User's revised idea: don't cut the video before the end of the route —
-    /// instead, RENDER MORE FRAMES that sit frozen at the destination. The
-    /// extras let the eye settle on the end while smoothing perception of the
-    /// last-frame glitch (continuous still image dominates over single jolt).
+    /// LEGACY: end-hold frames violate the "zero camera cut" constraint and are
+    /// always disabled when the continuous engine is on (which is the default).
+    /// Kept as a fallback only for the legacy snapshot pipeline.
     private var endHoldFrameCount: Int {
-        // Disabled → 0. Enabled → ~12.5% of totalFrames, min 12.
-        guard trimEndFrames else { return 0 }
+        guard !useContinuousEngine, trimEndFrames else { return 0 }
         let totalFrames: Int
         switch frameCountMode {
         case .duration: totalFrames = max(1, seconds * max(1, fps))
@@ -2991,11 +2992,15 @@ struct WallpaperMakerView: View {
             }
             .padding(.bottom, 4)
 
-            Toggle(L.stabilizeEnd, isOn: $trimEndFrames)
+            Toggle(L.continuousEngine, isOn: $useContinuousEngine)
                 .toggleStyle(.switch)
 
-            Toggle(L.previewModeRender, isOn: $previewModeRender)
-                .toggleStyle(.switch)
+            if !useContinuousEngine {
+                Toggle(L.stabilizeEnd, isOn: $trimEndFrames)
+                    .toggleStyle(.switch)
+                Toggle(L.previewModeRender, isOn: $previewModeRender)
+                    .toggleStyle(.switch)
+            }
 
             Toggle(L.followRealRoute, isOn: $useRoutePath)
                 .onChange(of: useRoutePath) { _, newVal in
@@ -3947,32 +3952,56 @@ struct WallpaperMakerView: View {
                 progressLabel = "\(L.frame) \(done) / \(totalFrames)"
             }
         } else {
-            // Apple path: parallel (4 MKMapSnapshotter at once, with preheat + retry).
-            // We pass the polyline so the route blue line is composited on every frame
-            // — same overlay as the live preview map.
+            // Apple path. Polyline overlay (blue route) handed to the renderer so it
+            // gets composited / drawn natively on every frame.
             let polylineLatLons: [Double]? = (useRoutePath && !routeCoordinates.isEmpty)
                 ? routeCoordinates.flatMap { [$0.latitude, $0.longitude] }
                 : nil
 
-            await RenderEngine.renderFramesParallel(
-                states: pathStates,
-                width: width,
-                height: height,
-                config: config,
-                polylineLatLons: polylineLatLons,
-                filter: selectedFilter,
-                previewModeRender: previewModeRender,
-                cancel: { self.cancelRequested },
-                onFrame: { idx, cg in
-                    let name = String(format: "%0*d.jpg", digits, idx)
-                    let url = frameDir.appendingPathComponent(name)
-                    try? TendiesExporter.writeCGImageAsJPEG(cg, to: url, quality: CGFloat(tendiesJpegQuality))
-                },
-                onProgress: { done, total in
-                    self.renderProgress = Double(done) / Double(total)
-                    self.progressLabel = "\(self.L.frame) \(done) / \(total)"
-                }
-            )
+            if useContinuousEngine {
+                // NEW continuous-capture pipeline. Drives the shared MKMapView via
+                // CADisplayLink at Vsync, captures each frame off the live render.
+                // Eliminates the discrete-snapshot race conditions and respects
+                // the "zero camera cut" constraint by construction.
+                await ContinuousRenderEngine.shared.startRender(
+                    states: pathStates,
+                    captureSize: CGSize(width: width, height: height),
+                    config: config,
+                    polylineLatLons: polylineLatLons,
+                    filter: selectedFilter,
+                    cancel: { self.cancelRequested },
+                    onFrame: { idx, cg in
+                        let name = String(format: "%0*d.jpg", digits, idx)
+                        let url = frameDir.appendingPathComponent(name)
+                        try? TendiesExporter.writeCGImageAsJPEG(cg, to: url, quality: CGFloat(self.tendiesJpegQuality))
+                    },
+                    onProgress: { done, total in
+                        self.renderProgress = Double(done) / Double(total)
+                        self.progressLabel = "\(self.L.frame) \(done) / \(total)"
+                    }
+                )
+            } else {
+                // LEGACY parallel snapshotter pipeline.
+                await RenderEngine.renderFramesParallel(
+                    states: pathStates,
+                    width: width,
+                    height: height,
+                    config: config,
+                    polylineLatLons: polylineLatLons,
+                    filter: selectedFilter,
+                    previewModeRender: previewModeRender,
+                    cancel: { self.cancelRequested },
+                    onFrame: { idx, cg in
+                        let name = String(format: "%0*d.jpg", digits, idx)
+                        let url = frameDir.appendingPathComponent(name)
+                        try? TendiesExporter.writeCGImageAsJPEG(cg, to: url, quality: CGFloat(tendiesJpegQuality))
+                    },
+                    onProgress: { done, total in
+                        self.renderProgress = Double(done) / Double(total)
+                        self.progressLabel = "\(self.L.frame) \(done) / \(total)"
+                    }
+                )
+            }
         }
 
         if cancelRequested {
@@ -4776,40 +4805,65 @@ struct WallpaperMakerView: View {
                 progressLabel = "\(L.frame) \(done) / \(totalFrames)"
             }
         } else {
-            // Apple path: parallel rendering with ordered writeback to AVAssetWriter.
-            // Frames may arrive out of order from the snapshot pool — buffer them
-            // in a small dictionary and drain consecutively into the asset writer.
-            var pendingFrames: [Int: CGImage] = [:]
-            var nextWriteIdx = 0
-
-            await RenderEngine.renderFramesParallel(
-                states: pathStates,
-                width: width,
-                height: height,
-                config: config,
-                polylineLatLons: polylineLatLons,
-                filter: selectedFilter,
-                previewModeRender: previewModeRender,
-                cancel: { self.cancelRequested },
-                onFrame: { idx, cg in
-                    pendingFrames[idx] = cg
-                    while let img = pendingFrames[nextWriteIdx] {
-                        pendingFrames.removeValue(forKey: nextWriteIdx)
-                        if let buf = self.makePixelBuffer(from: img, width: width, height: height) {
+            // Apple path. Choose between continuous engine (default) and legacy.
+            if useContinuousEngine {
+                // Continuous engine delivers frames IN ORDER (by construction —
+                // CADisplayLink ticks sequentially) so no reorder buffer needed.
+                await ContinuousRenderEngine.shared.startRender(
+                    states: pathStates,
+                    captureSize: CGSize(width: width, height: height),
+                    config: config,
+                    polylineLatLons: polylineLatLons,
+                    filter: selectedFilter,
+                    cancel: { self.cancelRequested },
+                    onFrame: { idx, cg in
+                        if let buf = self.makePixelBuffer(from: cg, width: width, height: height) {
                             while !input.isReadyForMoreMediaData {
                                 try? await Task.sleep(nanoseconds: 2_000_000)
                             }
-                            let pts = CMTimeMultiply(frameDuration, multiplier: Int32(nextWriteIdx))
+                            let pts = CMTimeMultiply(frameDuration, multiplier: Int32(idx))
                             _ = adaptor.append(buf, withPresentationTime: pts)
                         }
-                        nextWriteIdx += 1
+                    },
+                    onProgress: { done, total in
+                        self.renderProgress = Double(done) / Double(total)
+                        self.progressLabel = "\(self.L.frame) \(done) / \(total)"
                     }
-                },
-                onProgress: { done, total in
-                    self.renderProgress = Double(done) / Double(total)
-                    self.progressLabel = "\(self.L.frame) \(done) / \(total)"
-                }
-            )
+                )
+            } else {
+                // LEGACY parallel snapshotter pipeline with reorder buffer.
+                var pendingFrames: [Int: CGImage] = [:]
+                var nextWriteIdx = 0
+
+                await RenderEngine.renderFramesParallel(
+                    states: pathStates,
+                    width: width,
+                    height: height,
+                    config: config,
+                    polylineLatLons: polylineLatLons,
+                    filter: selectedFilter,
+                    previewModeRender: previewModeRender,
+                    cancel: { self.cancelRequested },
+                    onFrame: { idx, cg in
+                        pendingFrames[idx] = cg
+                        while let img = pendingFrames[nextWriteIdx] {
+                            pendingFrames.removeValue(forKey: nextWriteIdx)
+                            if let buf = self.makePixelBuffer(from: img, width: width, height: height) {
+                                while !input.isReadyForMoreMediaData {
+                                    try? await Task.sleep(nanoseconds: 2_000_000)
+                                }
+                                let pts = CMTimeMultiply(frameDuration, multiplier: Int32(nextWriteIdx))
+                                _ = adaptor.append(buf, withPresentationTime: pts)
+                            }
+                            nextWriteIdx += 1
+                        }
+                    },
+                    onProgress: { done, total in
+                        self.renderProgress = Double(done) / Double(total)
+                        self.progressLabel = "\(self.L.frame) \(done) / \(total)"
+                    }
+                )
+            }
         }
 
         // Si l'utilisateur a demandé l'annulation, on arrête proprement ici
