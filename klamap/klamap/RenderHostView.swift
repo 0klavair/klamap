@@ -39,15 +39,24 @@ struct RenderHostView: UIViewRepresentable {
         SharedMapViewRegistry.shared.applyConfig(styleConfig)
         SharedMapViewRegistry.shared.setPolyline(polylineCoords)
         SharedMapViewRegistry.shared.setAnnotations(pointA: pointA, pointB: pointB)
-        // Only push camera if it differs meaningfully — avoids fighting user's
-        // gestures.
+        // Only push camera if it differs meaningfully — avoids feedback loop
+        // (gesture → onCameraChange → currentPose update → updateUIView →
+        // setCamera → fires mapViewDidChangeVisibleRegion → onCameraChange...).
+        // We compare with WIDE thresholds so float-rebuild rounding from
+        // centerCoordinateDistance doesn't trigger unnecessary setCamera calls.
         let current = uiView.camera
+        let latDiff = abs(current.centerCoordinate.latitude - camera.centerCoordinate.latitude)
+        let lonDiff = abs(current.centerCoordinate.longitude - camera.centerCoordinate.longitude)
+        let headDiff = abs(current.heading - camera.heading)
+        let pitchDiff = abs(current.pitch - camera.pitch)
+        let distDiff = abs(current.centerCoordinateDistance - camera.centerCoordinateDistance)
+
         let changed =
-            abs(current.centerCoordinate.latitude - camera.centerCoordinate.latitude) > 1e-7 ||
-            abs(current.centerCoordinate.longitude - camera.centerCoordinate.longitude) > 1e-7 ||
-            abs(current.heading - camera.heading) > 0.1 ||
-            abs(current.pitch - camera.pitch) > 0.1 ||
-            abs(current.altitude - camera.altitude) > 1.0
+            latDiff > 1e-6 ||  // ~10 cm at the equator — well above float rounding
+            lonDiff > 1e-6 ||
+            headDiff > 0.5 ||  // half a degree
+            pitchDiff > 0.5 ||
+            distDiff > 5.0      // 5 metres — way above rebuild rounding
         if changed {
             uiView.setCamera(camera, animated: false)
         }
