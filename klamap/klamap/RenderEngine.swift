@@ -100,15 +100,28 @@ enum RenderEngine {
 
         if cancel() { return }
 
-        // Drive a TaskGroup with a sliding window of N concurrent snapshots.
-        // CRITICAL: hybrid + realistic 3D has a race on tile loading when multiple
-        // MKMapSnapshotter instances are in flight at once — each independently
-        // races to load mesh tiles, causing trembling/glitching at the end of the
-        // route. Force concurrency=1 with a settle delay for that one combo. The
-        // user explicitly accepts the slower render for a clean realistic 3D look.
+        // Hybrid + realistic 3D: route to the persistent MKMapView renderer.
+        // MKMapSnapshotter has unfixable issues with rapid sequential calls in
+        // hybrid mode (trembling, partial mesh loads). MKMapView preserves its
+        // tile state across camera moves so it doesn't suffer from the race.
         let isFragileHybrid = (config.style == .hybrid && config.realisticElevationWhenPitched)
-        let cap = isFragileHybrid ? 1 : max(1, concurrency)
-        let postSnapSettleNs: UInt64 = isFragileHybrid ? 80_000_000 : 0  // 80 ms
+        if isFragileHybrid {
+            await renderFramesViaPersistentMapView(
+                states: states,
+                width: width,
+                height: height,
+                config: config,
+                polylineLatLons: polylineLatLons,
+                filter: filter,
+                cancel: cancel,
+                onFrame: onFrame,
+                onProgress: onProgress
+            )
+            return
+        }
+
+        let cap = max(1, concurrency)
+        let postSnapSettleNs: UInt64 = 0
         var nextIdx = 0
         var completed = 0
         let polyline = polylineLatLons  // capture for closures
@@ -177,6 +190,58 @@ enum RenderEngine {
                     nextIdx += 1
                 }
             }
+        }
+    }
+
+    /// Persistent-MKMapView path for hybrid + realistic 3D. Sequential by nature
+    /// (one map view at a time) but each frame benefits from cached tiles, so
+    /// total time is comparable to the parallel snapshotter path while being
+    /// trembling-free. The route polyline is added as a native MKOverlay so it
+    /// projects correctly onto the 3D terrain.
+    @MainActor
+    private static func renderFramesViaPersistentMapView(
+        states: [CameraState],
+        width: Int,
+        height: Int,
+        config: SnapshotConfig,
+        polylineLatLons: [Double]?,
+        filter: RenderFilter,
+        cancel: @escaping @MainActor () -> Bool,
+        onFrame: @escaping @MainActor (Int, CGImage) async -> Void,
+        onProgress: @escaping @MainActor (Int, Int) -> Void
+    ) async {
+        let renderer = AppleMapsViewRenderer.shared
+
+        // Convert flat lat/lon list back to coordinate pairs.
+        var coords: [CLLocationCoordinate2D] = []
+        if let p = polylineLatLons, p.count >= 4 {
+            var i = 0
+            while i + 1 < p.count {
+                coords.append(CLLocationCoordinate2D(latitude: p[i], longitude: p[i + 1]))
+                i += 2
+            }
+        }
+
+        await renderer.prepare(
+            widthPx: width,
+            heightPx: height,
+            config: config,
+            polylineCoords: coords.isEmpty ? nil : coords,
+            startState: states[0]
+        )
+        defer {
+            // Tear down on the next main actor hop so the closure outlives the
+            // current frame's drawHierarchy.
+            Task { @MainActor in renderer.release() }
+        }
+
+        let total = states.count
+        for (idx, state) in states.enumerated() {
+            if cancel() { break }
+            if let cg = await renderer.snapshot(state: state, filter: filter) {
+                await onFrame(idx, cg)
+            }
+            onProgress(idx + 1, total)
         }
     }
 

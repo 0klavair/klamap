@@ -193,6 +193,12 @@ protocol LocalizationStrings {
     var preset: String { get }
     var filter: String { get }
 
+    // Server mode (HTTP server + multi-device)
+    var serverModeTitle: String { get }
+    var serverModeFooter: String { get }
+    var enableServer: String { get }
+    var serverURL: String { get }
+
     var cancelRender: String { get }
     var cancelling: String { get }
     var renderComplete: String { get }
@@ -516,6 +522,11 @@ struct FrenchStrings: LocalizationStrings {
     let clear = "Effacer"
     let preset = "Préréglage"
     let filter = "Filtre"
+
+    let serverModeTitle = "Mode serveur"
+    let serverModeFooter = "Active le serveur HTTP local. D'autres appareils sur le même Wi-Fi peuvent ouvrir l'URL pour utiliser klamap depuis un navigateur."
+    let enableServer = "Activer le serveur"
+    let serverURL = "URL"
 }
 
 struct EnglishStrings: LocalizationStrings {
@@ -756,6 +767,11 @@ struct EnglishStrings: LocalizationStrings {
     let clear = "Clear"
     let preset = "Preset"
     let filter = "Filter"
+
+    let serverModeTitle = "Server mode"
+    let serverModeFooter = "Starts a local HTTP server. Other devices on the same Wi-Fi can open the URL to use klamap from a browser."
+    let enableServer = "Enable server"
+    let serverURL = "URL"
 }
 
 // MARK: - Missing helpers & placeholders added for buildability
@@ -2230,6 +2246,36 @@ struct WallpaperMakerView: View {
                         }
                     }
                 }
+
+                Section(header: Text(L.serverModeTitle), footer: Text(L.serverModeFooter)) {
+                    Toggle(isOn: Binding(
+                        get: { LocalHTTPServer.shared.isRunning },
+                        set: { newVal in
+                            if newVal {
+                                LocalHTTPServer.shared.start()
+                            } else {
+                                LocalHTTPServer.shared.stop()
+                            }
+                        }
+                    )) {
+                        Label(L.enableServer, systemImage: "server.rack")
+                    }
+                    if let url = LocalHTTPServer.shared.url {
+                        HStack {
+                            Label(L.serverURL, systemImage: "link")
+                            Spacer()
+                            Text(url)
+                                .font(.system(.footnote, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                        }
+                    }
+                    if let err = LocalHTTPServer.shared.lastError {
+                        Text(err)
+                            .font(.footnote)
+                            .foregroundStyle(.red)
+                    }
+                }
                 Section(header: Text(L.controllerSettings)) {
                     HStack {
                         Text(L.panSensitivity)
@@ -2626,7 +2672,9 @@ struct WallpaperMakerView: View {
                     Text("\(Int(pitchDeg))°")
                         .foregroundStyle(.secondary)
                 }
-                Slider(value: $pitchDeg, in: 0...85, step: 1)
+                // Capped at 80° because MKMapCamera silently clamps anything above
+                // (and the live preview's MapCamera throws off-screen at 85°+).
+                Slider(value: $pitchDeg, in: 0...80, step: 1)
                     .onChange(of: pitchDeg) { _, _ in
                         hapticSliderChange()
                     }
