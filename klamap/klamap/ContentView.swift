@@ -160,6 +160,33 @@ protocol LocalizationStrings {
     var tendiesYourFile: String { get }
     var tendiesError: String { get }
     var defineABBeforeTendies: String { get }
+
+    // Map provider settings (Apple / Google)
+    var mapProviderTitle: String { get }
+    var mapProvider: String { get }
+    var cancel: String { get }
+    var iAccept: String { get }
+    var googleWarningTitle: String { get }
+    var googleWarningMessage: String { get }
+    var appleMapsFooter: String { get }
+    var googleMapsFooter: String { get }
+    var googleAPIKey: String { get }
+    var googleAPIKeyPlaceholder: String { get }
+    var googleAPIKeyFooter: String { get }
+    var paste: String { get }
+    var save: String { get }
+    var deleteKey: String { get }
+    var mapStyle: String { get }
+    var customJSONLabel: String { get }
+    var customJSONFooter: String { get }
+    var stylePresetFooter: String { get }
+    var googleBuildings3D: String { get }
+    var googleBuildings3DFooter: String { get }
+    var openGoogleConsole: String { get }
+    var openStyleDocs: String { get }
+    var help: String { get }
+    var savedRestartRequired: String { get }
+
     var cancelRender: String { get }
     var cancelling: String { get }
     var renderComplete: String { get }
@@ -452,6 +479,32 @@ struct FrenchStrings: LocalizationStrings {
     let tendiesYourFile = "Ton fichier .tendies est prêt. Importe-le dans Nugget ou Cowabunga pour l'installer comme fond d'écran animé sur l'iPhone."
     let tendiesError = "Erreur export Tendies"
     let defineABBeforeTendies = "Définis les points A et B avant de générer un fond d'écran."
+
+    // Map provider settings
+    let mapProviderTitle = "Cartes"
+    let mapProvider = "Fournisseur"
+    let cancel = "Annuler"
+    let iAccept = "J'accepte"
+    let googleWarningTitle = "Avertissement Google Maps"
+    let googleWarningMessage = "Cette fonctionnalité utilise Google Maps via TA propre clé API. Google facture chaque chargement de tile selon ses tarifs. La création de fonds d'écran à partir de tiles Google peut violer les CGU Google Maps. Tu confirmes que la facturation et la conformité aux CGU sont sous TA responsabilité."
+    let appleMapsFooter = "Apple Maps : gratuit, pas de configuration. Mode 3D Hybride photoréaliste dans les grandes villes."
+    let googleMapsFooter = "Google Maps : nécessite TA clé API Google Cloud. Plus de contrôle sur le style et les labels, mais facturé sur ton compte Google."
+    let googleAPIKey = "Clé API Google Maps"
+    let googleAPIKeyPlaceholder = "Colle ta clé API Google Maps ici"
+    let googleAPIKeyFooter = "Crée une clé sur console.cloud.google.com → APIs & Services → Credentials. Active 'Maps SDK for iOS'. La clé est stockée chiffrée dans le Keychain."
+    let paste = "Coller"
+    let save = "Sauvegarder"
+    let deleteKey = "Supprimer la clé"
+    let mapStyle = "Style de carte"
+    let customJSONLabel = "JSON de style personnalisé"
+    let customJSONFooter = "Format JSON Google Maps Style. Voir la doc officielle pour la syntaxe."
+    let stylePresetFooter = "Préréglage appliqué uniquement quand Google Maps est sélectionné."
+    let googleBuildings3D = "Bâtiments 3D"
+    let googleBuildings3DFooter = "Affiche les bâtiments en 3D dans Google Maps standard. Pour la 3D photoréaliste, faut la clé Map Tiles API en plus (à venir)."
+    let openGoogleConsole = "Ouvrir Google Cloud Console"
+    let openStyleDocs = "Documentation des styles"
+    let help = "Aide"
+    let savedRestartRequired = "Sauvegardé — redémarre l'app pour appliquer"
 }
 
 struct EnglishStrings: LocalizationStrings {
@@ -661,6 +714,32 @@ struct EnglishStrings: LocalizationStrings {
     let tendiesYourFile = "Your .tendies file is ready. Import it via Nugget or Cowabunga to install it as an animated lock-screen wallpaper."
     let tendiesError = "Tendies export error"
     let defineABBeforeTendies = "Define points A and B before generating a wallpaper."
+
+    // Map provider settings
+    let mapProviderTitle = "Map providers"
+    let mapProvider = "Provider"
+    let cancel = "Cancel"
+    let iAccept = "I accept"
+    let googleWarningTitle = "Google Maps warning"
+    let googleWarningMessage = "This feature uses Google Maps via YOUR own API key. Google bills each tile load at their published rates. Creating wallpapers from Google tiles may violate Google Maps Terms of Service. You confirm that billing and ToS compliance are YOUR responsibility."
+    let appleMapsFooter = "Apple Maps: free, no setup. Photorealistic 3D Hybrid mode in major cities."
+    let googleMapsFooter = "Google Maps: requires YOUR Google Cloud API key. More control over style and labels, but billed to your Google account."
+    let googleAPIKey = "Google Maps API key"
+    let googleAPIKeyPlaceholder = "Paste your Google Maps API key here"
+    let googleAPIKeyFooter = "Create a key at console.cloud.google.com → APIs & Services → Credentials. Enable 'Maps SDK for iOS'. The key is stored encrypted in the Keychain."
+    let paste = "Paste"
+    let save = "Save"
+    let deleteKey = "Delete key"
+    let mapStyle = "Map style"
+    let customJSONLabel = "Custom style JSON"
+    let customJSONFooter = "Google Maps Style JSON format. See the official docs for syntax."
+    let stylePresetFooter = "Preset applied only when Google Maps is selected."
+    let googleBuildings3D = "3D buildings"
+    let googleBuildings3DFooter = "Shows buildings in 3D in standard Google Maps. For photorealistic 3D, the Map Tiles API key is needed (coming later)."
+    let openGoogleConsole = "Open Google Cloud Console"
+    let openStyleDocs = "Style documentation"
+    let help = "Help"
+    let savedRestartRequired = "Saved — restart the app to apply"
 }
 
 // MARK: - Missing helpers & placeholders added for buildability
@@ -1964,6 +2043,19 @@ struct WallpaperMakerView: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
+                Section(header: Text(L.mapProviderTitle)) {
+                    NavigationLink {
+                        MapProviderSettingsView()
+                    } label: {
+                        HStack {
+                            Label(L.mapProvider, systemImage: "map")
+                            Spacer()
+                            Text(MapProviderSettings.shared.provider.displayName)
+                                .foregroundStyle(.secondary)
+                                .font(.footnote)
+                        }
+                    }
+                }
                 Section(header: Text(L.controllerSettings)) {
                     HStack {
                         Text(L.panSensitivity)
@@ -3106,22 +3198,47 @@ struct WallpaperMakerView: View {
         let digits = max(3, String(totalFrames).count)
 
         progressLabel = L.tendiesRendering
-        await RenderEngine.renderFramesParallel(
-            states: pathStates,
-            width: width,
-            height: height,
-            config: config,
-            cancel: { self.cancelRequested },
-            onFrame: { idx, cg in
-                let name = String(format: "%0*d.jpg", digits, idx)
-                let url = frameDir.appendingPathComponent(name)
-                try? TendiesExporter.writeCGImageAsJPEG(cg, to: url, quality: 0.9)
-            },
-            onProgress: { done, total in
-                self.renderProgress = Double(done) / Double(total)
-                self.progressLabel = "\(self.L.frame) \(done) / \(total)"
+        let mapSettings = MapProviderSettings.shared
+        if mapSettings.isGoogleMapsActive {
+            // Google path: sequential (one offscreen GMSMapView at a time, ~3-5x slower)
+            let styleJSON = mapSettings.effectiveStyleJSON
+            let buildings3D = mapSettings.useGoogleBuilding3D
+            for (idx, state) in pathStates.enumerated() {
+                if cancelRequested { break }
+                if let cg = await GoogleMapsRenderer.shared.snapshot(
+                    state: state,
+                    widthPx: width,
+                    heightPx: height,
+                    styleJSON: styleJSON,
+                    building3D: buildings3D
+                ) {
+                    let name = String(format: "%0*d.jpg", digits, idx)
+                    let url = frameDir.appendingPathComponent(name)
+                    try? TendiesExporter.writeCGImageAsJPEG(cg, to: url, quality: 0.9)
+                }
+                let done = idx + 1
+                renderProgress = Double(done) / Double(totalFrames)
+                progressLabel = "\(L.frame) \(done) / \(totalFrames)"
             }
-        )
+        } else {
+            // Apple path: parallel (4 MKMapSnapshotter at once, with preheat + retry)
+            await RenderEngine.renderFramesParallel(
+                states: pathStates,
+                width: width,
+                height: height,
+                config: config,
+                cancel: { self.cancelRequested },
+                onFrame: { idx, cg in
+                    let name = String(format: "%0*d.jpg", digits, idx)
+                    let url = frameDir.appendingPathComponent(name)
+                    try? TendiesExporter.writeCGImageAsJPEG(cg, to: url, quality: 0.9)
+                },
+                onProgress: { done, total in
+                    self.renderProgress = Double(done) / Double(total)
+                    self.progressLabel = "\(self.L.frame) \(done) / \(total)"
+                }
+            )
+        }
 
         if cancelRequested {
             cancelRequested = false

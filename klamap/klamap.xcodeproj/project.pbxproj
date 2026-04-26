@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		AC8289642EC8B71F00F9CE93 /* ZIPFoundation in Frameworks */ = {isa = PBXBuildFile; productRef = AC8289632EC8B71F00F9CE93 /* ZIPFoundation */; };
+		BB100003AABBCCDDEEFF0000 /* GoogleMaps in Frameworks */ = {isa = PBXBuildFile; productRef = BB100002AABBCCDDEEFF0000 /* GoogleMaps */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -28,6 +29,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				AC8289642EC8B71F00F9CE93 /* ZIPFoundation in Frameworks */,
+				BB100003AABBCCDDEEFF0000 /* GoogleMaps in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -71,6 +73,7 @@
 			name = klamap;
 			packageProductDependencies = (
 				AC8289632EC8B71F00F9CE93 /* ZIPFoundation */,
+				BB100002AABBCCDDEEFF0000 /* GoogleMaps */,
 			);
 			productName = klamap;
 			productReference = AC673C5F2EC79736007E4EEA /* klamap.app */;
@@ -102,6 +105,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				AC8289622EC8B71F00F9CE93 /* XCRemoteSwiftPackageReference "ZIPFoundation" */,
+				BB100001AABBCCDDEEFF0000 /* XCRemoteSwiftPackageReference "ios-maps-sdk" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = AC673C602EC79736007E4EEA /* Products */;
@@ -355,6 +359,14 @@
 				minimumVersion = 0.9.20;
 			};
 		};
+		BB100001AABBCCDDEEFF0000 /* XCRemoteSwiftPackageReference "ios-maps-sdk" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/googlemaps/ios-maps-sdk";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 9.0.0;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -362,6 +374,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = AC8289622EC8B71F00F9CE93 /* XCRemoteSwiftPackageReference "ZIPFoundation" */;
 			productName = ZIPFoundation;
+		};
+		BB100002AABBCCDDEEFF0000 /* GoogleMaps */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = BB100001AABBCCDDEEFF0000 /* XCRemoteSwiftPackageReference "ios-maps-sdk" */;
+			productName = GoogleMaps;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
