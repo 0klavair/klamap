@@ -94,10 +94,14 @@ final class LocalHTTPServer: ObservableObject {
                 return
             }
             let request = self.parseRequest(data)
-            let response = self.respond(to: request)
-            conn.send(content: response, completion: .contentProcessed { _ in
-                conn.cancel()
-            })
+            // Async response: render jobs take seconds-minutes, so we can't
+            // build the response synchronously inside the receive callback.
+            Task { @MainActor in
+                let response = await self.respondAsync(to: request)
+                conn.send(content: response, completion: .contentProcessed { _ in
+                    conn.cancel()
+                })
+            }
         }
     }
 
@@ -124,17 +128,21 @@ final class LocalHTTPServer: ObservableObject {
         return ParsedRequest(method: method, path: path, body: Data(body))
     }
 
-    private func respond(to req: ParsedRequest) -> Data {
-        // Routing: GET endpoints first, then POST.
+    /// Async router. GET endpoints respond synchronously; POST /api/render
+    /// awaits the worker (can take seconds-to-minutes for long renders).
+    private func respondAsync(to req: ParsedRequest) async -> Data {
         if req.method == "GET" {
             switch req.path {
             case "/", "/index.html":
                 return ok(body: htmlIndex(), contentType: "text/html; charset=utf-8")
             case "/status.json":
-                return ok(body: #"{"app":"klamap","version":"1.0","status":"running"}"#,
+                let busy = RenderJobWorker.isBusy ? "rendering" : "running"
+                return ok(body: #"{"app":"klamap","version":"1.0","status":"\#(busy)"}"#,
                           contentType: "application/json; charset=utf-8")
             case "/api/info":
-                let info = #"{"name":"\#(UIDevice.current.name)","capabilities":["render","tendies"],"protocolVersion":1}"#
+                let info = #"""
+                {"name":"\#(UIDevice.current.name)","capabilities":["render","tendies"],"protocolVersion":1,"busy":\#(RenderJobWorker.isBusy)}
+                """#
                 return ok(body: info, contentType: "application/json; charset=utf-8")
             default:
                 return notFound()
@@ -143,20 +151,33 @@ final class LocalHTTPServer: ObservableObject {
         if req.method == "POST" {
             switch req.path {
             case "/api/render":
-                // Phase 5 stub. The body will be JSON describing a render job:
-                // { states: [...], captureSize: {...}, config: {...}, ... }
-                // Phase 6 will actually queue this and run ContinuousRenderEngine.
-                let payloadSize = req.body.count
-                let stub = #"""
-                {"status":"accepted","message":"Render endpoint scaffold ready. Phase 6 will execute the job.","payloadBytes":\#(payloadSize)}
-                """#
-                return ok(status: 202, statusText: "Accepted",
-                          body: stub, contentType: "application/json; charset=utf-8")
+                return await handleRenderJob(body: req.body)
             default:
                 return notFound()
             }
         }
         return methodNotAllowed()
+    }
+
+    /// Decode the JSON body, run RenderJobWorker.process, return either the
+    /// .tendies bytes (200) or a JSON error.
+    private func handleRenderJob(body: Data) async -> Data {
+        let job: RenderJob
+        do {
+            job = try JSONDecoder().decode(RenderJob.self, from: body)
+        } catch {
+            return jsonError(status: 400, statusText: "Bad Request",
+                             message: "Invalid job JSON: \(error.localizedDescription)")
+        }
+        do {
+            let tendiesBytes = try await RenderJobWorker.process(job)
+            return okBinary(body: tendiesBytes,
+                            contentType: "application/octet-stream",
+                            filename: "\(job.tendiesParams.name).tendies")
+        } catch {
+            return jsonError(status: 500, statusText: "Internal Server Error",
+                             message: error.localizedDescription)
+        }
     }
 
     // MARK: - Response helpers
@@ -177,6 +198,28 @@ final class LocalHTTPServer: ObservableObject {
         HTTP/1.1 405 Method Not Allowed\r\nContent-Type: text/plain\r\nContent-Length: \(bodyData.count)\r\nConnection: close\r\n\r\n
         """
         return Data(header.utf8) + bodyData
+    }
+
+    /// Binary response — used to ship the .tendies bytes back to the client.
+    private func okBinary(body: Data, contentType: String, filename: String?) -> Data {
+        var headerStr = "HTTP/1.1 200 OK\r\nContent-Type: \(contentType)\r\nContent-Length: \(body.count)\r\nConnection: close\r\n"
+        if let filename = filename {
+            // Quote the filename for safety against spaces / specials.
+            headerStr += "Content-Disposition: attachment; filename=\"\(filename.replacingOccurrences(of: "\"", with: ""))\"\r\n"
+        }
+        headerStr += "\r\n"
+        return Data(headerStr.utf8) + body
+    }
+
+    /// JSON error response — used when the worker fails or the JSON is invalid.
+    private func jsonError(status: Int, statusText: String, message: String) -> Data {
+        let escaped = message
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "\n", with: " ")
+        let body = #"{"error":true,"status":\#(status),"message":"\#(escaped)"}"#
+        return ok(status: status, statusText: statusText, body: body,
+                  contentType: "application/json; charset=utf-8")
     }
 
     private func notFound() -> Data {
