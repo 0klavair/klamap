@@ -216,6 +216,7 @@ protocol LocalizationStrings {
     var cameraPathLogs: String { get }
     var shareLastLog: String { get }
     var stabilizeEnd: String { get }
+    var previewModeRender: String { get }
 
     var cancelRender: String { get }
     var cancelling: String { get }
@@ -561,6 +562,7 @@ struct FrenchStrings: LocalizationStrings {
     let cameraPathLogs = "Logs trajectoire caméra"
     let shareLastLog = "Partager le dernier log"
     let stabilizeEnd = "Stabiliser la fin (recommandé)"
+    let previewModeRender = "Rendu identique à la preview"
 }
 
 struct EnglishStrings: LocalizationStrings {
@@ -822,6 +824,7 @@ struct EnglishStrings: LocalizationStrings {
     let cameraPathLogs = "Camera path logs"
     let shareLastLog = "Share last log"
     let stabilizeEnd = "Stabilize end (recommended)"
+    let previewModeRender = "Preview-quality render"
 }
 
 // MARK: - Missing helpers & placeholders added for buildability
@@ -1558,6 +1561,12 @@ struct WallpaperMakerView: View {
     /// trembling that hybrid+realistic 3D mode shows in the last few frames.
     /// Default ON because the bug is most visible exactly there.
     @AppStorage("trimEndFrames") private var trimEndFrames: Bool = true
+
+    /// When on, the export pipeline matches the live preview's behavior: instant
+    /// camera updates, minimal Vsync wait, no waiting for tile-load delegates.
+    /// User explicitly asked: "I want it to work like the preview, the preview
+    /// is perfect" — that's exactly what this toggle delivers. Default ON.
+    @AppStorage("previewModeRender") private var previewModeRender: Bool = true
 
     /// When on, every pathPoint() result is written to a CSV log under tmp/.
     /// Lets the user (or me) see the exact camera trajectory, helps diagnose
@@ -2961,6 +2970,9 @@ struct WallpaperMakerView: View {
             Toggle(L.stabilizeEnd, isOn: $trimEndFrames)
                 .toggleStyle(.switch)
 
+            Toggle(L.previewModeRender, isOn: $previewModeRender)
+                .toggleStyle(.switch)
+
             Toggle(L.followRealRoute, isOn: $useRoutePath)
                 .onChange(of: useRoutePath) { _, newVal in
                     if newVal {
@@ -3925,6 +3937,7 @@ struct WallpaperMakerView: View {
                 config: config,
                 polylineLatLons: polylineLatLons,
                 filter: selectedFilter,
+                previewModeRender: previewModeRender,
                 cancel: { self.cancelRequested },
                 onFrame: { idx, cg in
                     let name = String(format: "%0*d.jpg", digits, idx)
@@ -4749,6 +4762,7 @@ struct WallpaperMakerView: View {
                 config: config,
                 polylineLatLons: polylineLatLons,
                 filter: selectedFilter,
+                previewModeRender: previewModeRender,
                 cancel: { self.cancelRequested },
                 onFrame: { idx, cg in
                     pendingFrames[idx] = cg

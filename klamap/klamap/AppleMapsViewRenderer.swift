@@ -49,12 +49,33 @@ final class AppleMapsViewRenderer: NSObject {
 
     /// Snapshot a single frame at the given camera state. Must be called after
     /// prepare(). Sequential only — each call awaits the previous one.
-    func snapshot(state: CameraState, filter: RenderFilter = .none) async -> CGImage? {
+    /// Two modes:
+    /// - `previewLike: true` (default): minimal wait between camera updates,
+    ///   matches the live SwiftUI preview behavior. May show partial tile
+    ///   loading like the preview does, but the user explicitly asked for the
+    ///   export to look exactly like the preview.
+    /// - `previewLike: false`: waits for `mapViewDidFinishRenderingMap` with a
+    ///   2.5 s safety timeout. Fully loaded tiles, slower.
+    func snapshot(state: CameraState, filter: RenderFilter = .none, previewLike: Bool = true) async -> CGImage? {
         guard let mapView = mapView, let size = currentSize else { return nil }
-        // 2.5 s per-frame settle — enough for Hybrid mesh tile loading even on
-        // poor network. Faster modes will still hit the delegate callback first
-        // (this is just the safety timeout).
-        await setCameraAndWait(state: state, timeout: 2.5)
+        if previewLike {
+            // Match the live preview: instant camera change, minimal Vsync
+            // wait, capture whatever's drawn. Tiles converge frame-over-frame
+            // exactly like SwiftUI's Map(position:) does.
+            let cam = MKMapCamera(
+                lookingAtCenter: CLLocationCoordinate2D(latitude: state.lat, longitude: state.lon),
+                fromDistance: max(20, state.distance),
+                pitch: max(0, min(80, state.pitch)),
+                heading: state.heading.isFinite ? state.heading : 0
+            )
+            mapView.setCamera(cam, animated: false)
+            // ~2 Vsync at 60Hz = enough for MapKit to redraw the new viewport
+            // without waiting for new tile network fetches.
+            try? await Task.sleep(nanoseconds: 33_000_000)
+        } else {
+            // Quality mode: wait for fully loaded tiles.
+            await setCameraAndWait(state: state, timeout: 2.5)
+        }
         guard let cg = capture(mapView, size: size) else { return nil }
         return RenderFilter.apply(filter, to: cg)
     }

@@ -51,6 +51,7 @@ enum RenderEngine {
         config: SnapshotConfig,
         polylineLatLons: [Double]? = nil,
         filter: RenderFilter = .none,
+        previewModeRender: Bool = true,
         concurrency: Int = RenderEngine.defaultConcurrency,
         cancel: @escaping @MainActor () -> Bool,
         onFrame: @escaping @MainActor (Int, CGImage) async -> Void,
@@ -113,6 +114,7 @@ enum RenderEngine {
                 config: config,
                 polylineLatLons: polylineLatLons,
                 filter: filter,
+                previewLike: previewModeRender,
                 cancel: cancel,
                 onFrame: onFrame,
                 onProgress: onProgress
@@ -206,6 +208,7 @@ enum RenderEngine {
         config: SnapshotConfig,
         polylineLatLons: [Double]?,
         filter: RenderFilter,
+        previewLike: Bool,
         cancel: @escaping @MainActor () -> Bool,
         onFrame: @escaping @MainActor (Int, CGImage) async -> Void,
         onProgress: @escaping @MainActor (Int, Int) -> Void
@@ -249,7 +252,7 @@ enum RenderEngine {
             if let last = lastState, statesEqual(state, last), let img = lastImage {
                 await onFrame(idx, img)
             } else {
-                if let cg = await renderer.snapshot(state: state, filter: filter) {
+                if let cg = await renderer.snapshot(state: state, filter: filter, previewLike: previewLike) {
                     await onFrame(idx, cg)
                     lastImage = cg
                     lastState = state
