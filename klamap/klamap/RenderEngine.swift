@@ -235,14 +235,39 @@ enum RenderEngine {
             Task { @MainActor in renderer.release() }
         }
 
+        // Same-state short-circuit. The user's CSV log proved that frames with
+        // IDENTICAL camera state were producing DIFFERENT renders because
+        // MapKit kept loading tiles in the background between snapshots.
+        // For consecutive identical states (typically the end-hold frames at
+        // profT=1.0), we reuse the previous frame's CGImage instead of
+        // re-rendering — guarantees pixel-identical hold portion.
         let total = states.count
+        var lastState: CameraState?
+        var lastImage: CGImage?
         for (idx, state) in states.enumerated() {
             if cancel() { break }
-            if let cg = await renderer.snapshot(state: state, filter: filter) {
-                await onFrame(idx, cg)
+            if let last = lastState, statesEqual(state, last), let img = lastImage {
+                await onFrame(idx, img)
+            } else {
+                if let cg = await renderer.snapshot(state: state, filter: filter) {
+                    await onFrame(idx, cg)
+                    lastImage = cg
+                    lastState = state
+                }
             }
             onProgress(idx + 1, total)
         }
+    }
+
+    /// Coordinate-precision equality used to detect "this is the same camera
+    /// state, just rendered again" — drives the hold-frame short-circuit.
+    nonisolated private static func statesEqual(_ a: CameraState, _ b: CameraState) -> Bool {
+        let eps = 1e-9
+        return abs(a.lat - b.lat) < eps
+            && abs(a.lon - b.lon) < eps
+            && abs(a.distance - b.distance) < 0.01
+            && abs(a.pitch - b.pitch) < 0.001
+            && abs(a.heading - b.heading) < 0.001
     }
 
     /// Renders a single frame on demand. Used for image export and previews.

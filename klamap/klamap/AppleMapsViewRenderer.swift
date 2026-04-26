@@ -42,14 +42,19 @@ final class AppleMapsViewRenderer: NSObject {
         configure(config: config)
         applyPolyline(polylineCoords)
         // Warm up at the start state with a longer settle so first-frame tiles load.
-        await setCameraAndWait(state: startState, timeout: 2.5)
+        // 4 s is generous but Hybrid + realistic 3D mesh genuinely takes that long
+        // for the destination tile set; shorter values were causing the trembling.
+        await setCameraAndWait(state: startState, timeout: 4.0)
     }
 
     /// Snapshot a single frame at the given camera state. Must be called after
     /// prepare(). Sequential only — each call awaits the previous one.
     func snapshot(state: CameraState, filter: RenderFilter = .none) async -> CGImage? {
         guard let mapView = mapView, let size = currentSize else { return nil }
-        await setCameraAndWait(state: state, timeout: 1.5)
+        // 2.5 s per-frame settle — enough for Hybrid mesh tile loading even on
+        // poor network. Faster modes will still hit the delegate callback first
+        // (this is just the safety timeout).
+        await setCameraAndWait(state: state, timeout: 2.5)
         guard let cg = capture(mapView, size: size) else { return nil }
         return RenderFilter.apply(filter, to: cg)
     }
