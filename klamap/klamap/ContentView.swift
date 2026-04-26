@@ -3499,82 +3499,151 @@ struct WallpaperMakerView: View {
 
     private var mapPicker: some View {
         ZStack(alignment: .center) {
-            let start = MapCamera(
-                centerCoordinate: loc.location?.coordinate
-                    ?? CLLocationCoordinate2D(latitude: 48.8566, longitude: 2.3522),
-                distance: 900,
-                heading: 0,
-                pitch: 45
-            )
-
-            Map(position: $mapPos) {
-                if let a = pointA {
-                    Annotation("A", coordinate: a) { pin("A") }
-                }
-                if let b = pointB {
-                    Annotation("B", coordinate: b) { pin("B") }
-                }
-                if useRoutePath, let poly = routePolyline {
-                    MapPolyline(poly)
-                        .stroke(.blue, lineWidth: 4)
-                }
-            }
-            .mapStyle(
-                hideRoadLabels
-                ? (
-                    (pitchDeg > 1)
-                    ? .standard(elevation: .realistic, emphasis: .muted)
-                    : .standard(elevation: .flat, emphasis: .muted)
+            // PHASE 2 of the rendering redesign: the preview now uses the SAME
+            // MKMapView instance that the export pipeline drives. This means:
+            // - Tile cache stays warm between editing and exporting
+            // - The export captures literally the view the user has been
+            //   interacting with (no separate offscreen instance)
+            // - Solves the user's "preview is perfect but render isn't" gap
+            //   by making them the same render
+            if useContinuousEngine {
+                RenderHostView(
+                    camera: liveMapCameraBinding(),
+                    styleConfig: liveSnapshotConfig(),
+                    polylineCoords: useRoutePath ? routeCoordinates : nil,
+                    pointA: pointA,
+                    pointB: pointB,
+                    onCameraChange: { cam in
+                        crosshairCenter = cam.centerCoordinate
+                        currentPose = CamPose(
+                            distance: cam.distance,
+                            pitch: cam.pitch,
+                            heading: cam.heading
+                        )
+                    }
                 )
-                : mapStyleForLive(liveStyle)
-            )
-            .id(liveMapIdentity)
-            .onAppear {
-                // Ne réinitialise la caméra qu'une seule fois, au tout premier affichage.
-                if case .automatic = mapPos {
-                    mapPos = .camera(start)
+                .onChange(of: liveStyle) { _, newVal in
+                    if newVal == .hybrid { showHybridWarning = true }
                 }
-            }
-            .onMapCameraChange { ctx in
-                crosshairCenter = ctx.region.center
-                let cam = ctx.camera
-                currentPose = CamPose(
-                    distance: cam.distance,
-                    pitch: cam.pitch,
-                    heading: cam.heading
+            } else {
+                // Legacy SwiftUI Map path (only when continuous engine OFF).
+                let start = MapCamera(
+                    centerCoordinate: loc.location?.coordinate
+                        ?? CLLocationCoordinate2D(latitude: 48.8566, longitude: 2.3522),
+                    distance: 900,
+                    heading: 0,
+                    pitch: 45
                 )
-                sharedCamera = ctx.camera
-            }
-            .onChange(of: liveStyle) { _, newVal in
-                let center = crosshairCenter
-                    ?? loc.location?.coordinate
-                    ?? CLLocationCoordinate2D(latitude: 48.8566, longitude: 2.3522)
-                let cam = MapCamera(
-                    centerCoordinate: center,
-                    distance: currentPose.distance,
-                    heading: currentPose.heading,
-                    pitch: CGFloat(pitchDeg)
-                )
-                mapPos = .camera(cam)
-                if newVal == .hybrid {
-                    showHybridWarning = true
+                Map(position: $mapPos) {
+                    if let a = pointA {
+                        Annotation("A", coordinate: a) { pin("A") }
+                    }
+                    if let b = pointB {
+                        Annotation("B", coordinate: b) { pin("B") }
+                    }
+                    if useRoutePath, let poly = routePolyline {
+                        MapPolyline(poly).stroke(.blue, lineWidth: 4)
+                    }
                 }
-            }
-            .onChange(of: pitchDeg) { _, newVal in
-                let center = crosshairCenter
-                    ?? loc.location?.coordinate
-                    ?? CLLocationCoordinate2D(latitude: 48.8566, longitude: 2.3522)
-                let cam = MapCamera(
-                    centerCoordinate: center,
-                    distance: currentPose.distance,
-                    heading: currentPose.heading,
-                    pitch: CGFloat(newVal)
+                .mapStyle(
+                    hideRoadLabels
+                    ? (
+                        (pitchDeg > 1)
+                        ? .standard(elevation: .realistic, emphasis: .muted)
+                        : .standard(elevation: .flat, emphasis: .muted)
+                    )
+                    : mapStyleForLive(liveStyle)
                 )
-                mapPos = .camera(cam)
+                .id(liveMapIdentity)
+                .onAppear {
+                    if case .automatic = mapPos {
+                        mapPos = .camera(start)
+                    }
+                }
+                .onMapCameraChange { ctx in
+                    crosshairCenter = ctx.region.center
+                    let cam = ctx.camera
+                    currentPose = CamPose(
+                        distance: cam.distance,
+                        pitch: cam.pitch,
+                        heading: cam.heading
+                    )
+                    sharedCamera = ctx.camera
+                }
+                .onChange(of: liveStyle) { _, newVal in
+                    let center = crosshairCenter
+                        ?? loc.location?.coordinate
+                        ?? CLLocationCoordinate2D(latitude: 48.8566, longitude: 2.3522)
+                    let cam = MapCamera(
+                        centerCoordinate: center,
+                        distance: currentPose.distance,
+                        heading: currentPose.heading,
+                        pitch: CGFloat(pitchDeg)
+                    )
+                    mapPos = .camera(cam)
+                    if newVal == .hybrid { showHybridWarning = true }
+                }
+                .onChange(of: pitchDeg) { _, newVal in
+                    let center = crosshairCenter
+                        ?? loc.location?.coordinate
+                        ?? CLLocationCoordinate2D(latitude: 48.8566, longitude: 2.3522)
+                    let cam = MapCamera(
+                        centerCoordinate: center,
+                        distance: currentPose.distance,
+                        heading: currentPose.heading,
+                        pitch: CGFloat(newVal)
+                    )
+                    mapPos = .camera(cam)
+                }
             }
 
             crosshair
         }
+    }
+
+    /// Bridge between the preview's camera state and the SHARED MKMapView's
+    /// MKMapCamera. Reads back the live camera position so we can react to
+    /// pitch/style changes without losing the user's center / heading.
+    private func liveMapCameraBinding() -> Binding<MKMapCamera> {
+        Binding<MKMapCamera>(
+            get: {
+                let center = crosshairCenter
+                    ?? loc.location?.coordinate
+                    ?? CLLocationCoordinate2D(latitude: 48.8566, longitude: 2.3522)
+                return MKMapCamera(
+                    lookingAtCenter: center,
+                    fromDistance: currentPose.distance > 0 ? currentPose.distance : 900,
+                    pitch: CGFloat(pitchDeg),
+                    heading: currentPose.heading
+                )
+            },
+            set: { newCam in
+                // RenderHostView writes back when the user pans/zooms.
+                crosshairCenter = newCam.centerCoordinate
+                currentPose = CamPose(
+                    distance: newCam.distance,
+                    pitch: newCam.pitch,
+                    heading: newCam.heading
+                )
+            }
+        )
+    }
+
+    /// SnapshotConfig built from the user's live style choices. Drives both the
+    /// preview and the export through the SHARED view.
+    private func liveSnapshotConfig() -> SnapshotConfig {
+        let style: SnapshotConfig.Style
+        switch liveStyle {
+        case .standard: style = .standard
+        case .muted:    style = .muted
+        case .hybrid:   style = .hybrid
+        }
+        return SnapshotConfig(
+            style: style,
+            showPOI: showPOI,
+            hideRoadLabels: hideRoadLabels,
+            realisticElevationWhenPitched: true
+        )
     }
 
     private func pin(_ t: String) -> some View {
