@@ -34,8 +34,9 @@ struct RenderHostView: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: MKMapView, context: Context) {
-        // Push UI state down. Capture mode wins — we don't fight it.
-        guard !SharedMapViewRegistry.shared.isOwnedByCapture else { return }
+        // Tick 3: capture now uses its own offscreen view, so we no longer
+        // skip UI state pushes during exports — the preview keeps updating
+        // while the user watches the export run.
         SharedMapViewRegistry.shared.applyConfig(styleConfig)
         SharedMapViewRegistry.shared.setPolyline(polylineCoords)
         SharedMapViewRegistry.shared.setAnnotations(pointA: pointA, pointB: pointB)
@@ -74,9 +75,7 @@ struct RenderHostView: UIViewRepresentable {
         nonisolated func mapViewDidChangeVisibleRegion(_ mapView: MKMapView) {
             Task { @MainActor [weak mapView] in
                 guard let mapView = mapView else { return }
-                if !SharedMapViewRegistry.shared.isOwnedByCapture {
-                    self.parent.onCameraChange?(mapView.camera)
-                }
+                self.parent.onCameraChange?(mapView.camera)
             }
         }
 
