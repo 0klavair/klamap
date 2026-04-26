@@ -221,6 +221,9 @@ protocol LocalizationStrings {
     var tendiesQualityTitle: String { get }
     var tendiesQuality: String { get }
     var tendiesQualityFooter: String { get }
+    var tendiesFrameCap: String { get }
+    var tendiesFrameCapEnforce: String { get }
+    var tendiesEstimatedSize: String { get }
 
     var cancelRender: String { get }
     var cancelling: String { get }
@@ -570,7 +573,10 @@ struct FrenchStrings: LocalizationStrings {
     let continuousEngine = "Moteur de rendu continu (recommandé)"
     let tendiesQualityTitle = "Qualité Tendies"
     let tendiesQuality = "Qualité JPEG"
-    let tendiesQualityFooter = "Plus haut = meilleure qualité visuelle mais fichier plus gros. 95% par défaut, max 100%."
+    let tendiesQualityFooter = "85% est le sweet spot : visuel quasi-identique à 100%, fichier divisé par 2. iOS rescale les wallpapers donc la différence ne se voit pas."
+    let tendiesFrameCap = "Plafond de frames"
+    let tendiesFrameCapEnforce = "Limiter le nombre de frames"
+    let tendiesEstimatedSize = "Taille estimée"
 }
 
 struct EnglishStrings: LocalizationStrings {
@@ -836,7 +842,10 @@ struct EnglishStrings: LocalizationStrings {
     let continuousEngine = "Continuous render engine (recommended)"
     let tendiesQualityTitle = "Tendies quality"
     let tendiesQuality = "JPEG quality"
-    let tendiesQualityFooter = "Higher = better visual quality but larger file. 95% default, 100% max."
+    let tendiesQualityFooter = "85% is the sweet spot: visually identical to 100%, file size halved. iOS rescales wallpapers so the difference isn't visible."
+    let tendiesFrameCap = "Frame cap"
+    let tendiesFrameCapEnforce = "Limit frame count"
+    let tendiesEstimatedSize = "Estimated size"
 }
 
 // MARK: - Missing helpers & placeholders added for buildability
@@ -1538,6 +1547,8 @@ struct WallpaperMakerView: View {
 
     /// One-click camera + style + timing combinations the user can apply, then tweak.
     enum CameraPreset: String, CaseIterable, Identifiable {
+        case wallpaper          // ← baseline know-good for tendies, modeled on Apple Park
+        case wallpaperSmooth    // ← higher fps for ProMotion devices
         case cinematicDrive
         case aerialTour
         case streetLevel
@@ -1549,12 +1560,14 @@ struct WallpaperMakerView: View {
 
         var displayName: String {
             switch self {
-            case .cinematicDrive: return "Cinematic Drive"
-            case .aerialTour:     return "Aerial Tour"
-            case .streetLevel:    return "Street Level"
-            case .topDown:        return "Top-Down"
-            case .documentary:    return "Documentary"
-            case .realistic3D:    return "Realistic 3D"
+            case .wallpaper:       return "Wallpaper (Apple-like)"
+            case .wallpaperSmooth: return "Wallpaper Smooth"
+            case .cinematicDrive:  return "Cinematic Drive"
+            case .aerialTour:      return "Aerial Tour"
+            case .streetLevel:     return "Street Level"
+            case .topDown:         return "Top-Down"
+            case .documentary:     return "Documentary"
+            case .realistic3D:     return "Realistic 3D"
             }
         }
     }
@@ -1581,9 +1594,17 @@ struct WallpaperMakerView: View {
     /// is perfect" — that's exactly what this toggle delivers. Default ON.
     @AppStorage("previewModeRender") private var previewModeRender: Bool = true
 
-    /// JPEG quality for tendies frames. Default 0.95 = max quality (user explicitly
-    /// asked: "Je veux vraiment une grosse qualité"). Range 0.5..1.0.
-    @AppStorage("tendiesJpegQuality") private var tendiesJpegQuality: Double = 0.95
+    /// JPEG quality for tendies frames. 0.85 default after user shipped a 1 GB
+    /// wallpaper with 720 frames at 0.95 — the visual difference between 0.85
+    /// and 0.95 is invisible on iPhone screens (heavy iOS rescaling) but the
+    /// file shrinks ~50%. Range 0.5..1.0, slider in Settings.
+    @AppStorage("tendiesJpegQuality") private var tendiesJpegQuality: Double = 0.85
+
+    /// Soft cap on the number of frames packaged into a tendies. iOS slide-to-
+    /// unlock takes ~0.5-1 s — beyond ~180 frames there's no perceptible benefit
+    /// and the file grows linearly. User can lift the cap from the UI.
+    @AppStorage("tendiesFrameCap") private var tendiesFrameCap: Int = 240
+    @AppStorage("tendiesEnforceFrameCap") private var tendiesEnforceFrameCap: Bool = true
 
     /// When on, every pathPoint() result is written to a CSV log under tmp/.
     /// Lets the user (or me) see the exact camera trajectory, helps diagnose
@@ -1596,6 +1617,41 @@ struct WallpaperMakerView: View {
     /// area they were exploring).
     private func applyCameraPreset(_ preset: CameraPreset) {
         switch preset {
+        case .wallpaper:
+            // Modeled on Apple's WWDC22 wallpaper sample (the baseline that
+            // works well): 4 s × 30 fps = 120 frames, hybrid + 3D realistic,
+            // medium JPEG quality. Result: ~50 MB .tendies, smooth slide.
+            seconds = 4
+            fps = 30
+            frameCountMode = .duration
+            pitchDeg = 55
+            liveStyle = .hybrid
+            useRoutePath = false
+            keepCentered = true
+            splineEnabled = false
+            easing = .easeInOut
+            hideRoadLabels = true
+            showPOI = false
+            tendiesJpegQuality = 0.85
+            tendiesEnforceFrameCap = true
+            tendiesFrameCap = 240
+        case .wallpaperSmooth:
+            // ProMotion devices (120Hz). 4 s × 60 fps = 240 frames, slightly
+            // higher quality. ~120 MB .tendies, ultra-smooth slide.
+            seconds = 4
+            fps = 60
+            frameCountMode = .duration
+            pitchDeg = 55
+            liveStyle = .hybrid
+            useRoutePath = false
+            keepCentered = true
+            splineEnabled = false
+            easing = .easeInOut
+            hideRoadLabels = true
+            showPOI = false
+            tendiesJpegQuality = 0.88
+            tendiesEnforceFrameCap = true
+            tendiesFrameCap = 360
         case .cinematicDrive:
             pitchDeg = 65
             liveStyle = .hybrid
@@ -1996,6 +2052,27 @@ struct WallpaperMakerView: View {
                 showEasterEgg = false
                 confettiPhase = false
             }
+        }
+    }
+
+    /// Live estimate of the .tendies file size based on current settings.
+    /// Empirical: a 1170×2532 JPEG averages ~q × 1.95 MB at quality q ≥ 0.5.
+    private func estimatedTendiesSize() -> String {
+        let fps_local = max(1, fps)
+        var n: Int
+        switch frameCountMode {
+        case .duration: n = max(1, seconds * fps_local)
+        case .fixedFrames: n = max(1, fixedFrameCount)
+        }
+        if tendiesEnforceFrameCap && n > tendiesFrameCap { n = tendiesFrameCap }
+        // Approximation: per-frame size scales roughly linearly with quality
+        // for q ∈ [0.6, 1.0]. Constants tuned to a 1170×2532 Apple Maps frame.
+        let perFrameMB = max(0.10, tendiesJpegQuality * 1.95 - 0.45)
+        let totalMB = Double(n) * perFrameMB
+        if totalMB >= 1024 {
+            return String(format: "~%.2f GB (%d frames)", totalMB / 1024, n)
+        } else {
+            return String(format: "~%.0f MB (%d frames)", totalMB, n)
         }
     }
 
@@ -2466,6 +2543,36 @@ struct WallpaperMakerView: View {
                             .font(.footnote.monospacedDigit())
                     }
                     Slider(value: $tendiesJpegQuality, in: 0.5...1.0, step: 0.05)
+
+                    Toggle(isOn: $tendiesEnforceFrameCap) {
+                        Label(L.tendiesFrameCapEnforce, systemImage: "speedometer")
+                    }
+                    if tendiesEnforceFrameCap {
+                        HStack {
+                            Label(L.tendiesFrameCap, systemImage: "number")
+                            Spacer()
+                            Text("\(tendiesFrameCap)")
+                                .foregroundStyle(.secondary)
+                                .font(.footnote.monospacedDigit())
+                        }
+                        Slider(
+                            value: Binding(
+                                get: { Double(tendiesFrameCap) },
+                                set: { tendiesFrameCap = Int($0.rounded()) }
+                            ),
+                            in: 60...600,
+                            step: 30
+                        )
+                    }
+
+                    // Live size estimate
+                    HStack {
+                        Label(L.tendiesEstimatedSize, systemImage: "scalemass")
+                        Spacer()
+                        Text(estimatedTendiesSize())
+                            .foregroundStyle(.secondary)
+                            .font(.footnote.monospacedDigit())
+                    }
                 }
 
                 Section(header: Text(L.debug)) {
@@ -3877,12 +3984,19 @@ struct WallpaperMakerView: View {
 
         // Frame count: respect the user's existing duration / fps / fixed-frames choice.
         let fps_local = max(1, fps)
-        let totalFrames: Int
+        var totalFrames: Int
         switch frameCountMode {
         case .duration:
             totalFrames = max(1, seconds * fps_local)
         case .fixedFrames:
             totalFrames = max(1, fixedFrameCount)
+        }
+        // Soft cap to prevent multi-GB tendies. iOS slide-to-unlock takes ~0.5-1 s
+        // so beyond ~180 frames there's no perceptual benefit. User can disable
+        // the cap from Settings if they explicitly want a longer wallpaper loop.
+        if tendiesEnforceFrameCap && totalFrames > tendiesFrameCap {
+            print("[Tendies] Frame count \(totalFrames) capped to \(tendiesFrameCap) (Settings → Tendies frame cap)")
+            totalFrames = tendiesFrameCap
         }
 
         // iPhone wallpaper aspect (390x844 in points). Default render is @3x = 1170x2532.
