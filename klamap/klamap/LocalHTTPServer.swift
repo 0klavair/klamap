@@ -86,43 +86,95 @@ final class LocalHTTPServer: ObservableObject {
 
     private func handle(_ conn: NWConnection) {
         conn.start(queue: .main)
-        conn.receive(minimumIncompleteLength: 1, maximumLength: 16 * 1024) { [weak self] data, _, _, _ in
+        // Up to 4 MB payload — generous for JSON job submissions including
+        // long trajectory arrays.
+        conn.receive(minimumIncompleteLength: 1, maximumLength: 4 * 1024 * 1024) { [weak self] data, _, _, _ in
             guard let self = self, let data = data else {
                 conn.cancel()
                 return
             }
-            let request = String(data: data, encoding: .utf8) ?? ""
-            let path = self.parsePath(request)
-            let response = self.respond(to: path)
+            let request = self.parseRequest(data)
+            let response = self.respond(to: request)
             conn.send(content: response, completion: .contentProcessed { _ in
                 conn.cancel()
             })
         }
     }
 
-    private func parsePath(_ request: String) -> String {
-        // First line: "GET /some/path HTTP/1.1"
-        let firstLine = request.split(separator: "\r\n", maxSplits: 1, omittingEmptySubsequences: true).first ?? ""
-        let parts = firstLine.split(separator: " ")
-        return parts.count >= 2 ? String(parts[1]) : "/"
+    /// Parsed HTTP request: method + path + body (everything after \r\n\r\n).
+    private struct ParsedRequest {
+        let method: String
+        let path: String
+        let body: Data
     }
 
-    private func respond(to path: String) -> Data {
-        let body: String
-        let contentType: String
-        switch path {
-        case "/", "/index.html":
-            contentType = "text/html; charset=utf-8"
-            body = htmlIndex()
-        case "/status.json":
-            contentType = "application/json; charset=utf-8"
-            body = #"{"app":"klamap","version":"1.0","status":"running"}"#
-        default:
-            return notFound()
+    private func parseRequest(_ data: Data) -> ParsedRequest {
+        // Find the \r\n\r\n separator between headers and body.
+        let separator = Data([0x0D, 0x0A, 0x0D, 0x0A])
+        let headerEnd = data.range(of: separator)?.lowerBound ?? data.endIndex
+        let headerData = data[..<headerEnd]
+        let bodyStart = data.index(headerEnd, offsetBy: 4, limitedBy: data.endIndex) ?? data.endIndex
+        let body = bodyStart < data.endIndex ? data[bodyStart...] : Data()
+
+        let headerString = String(data: headerData, encoding: .utf8) ?? ""
+        let firstLine = headerString.split(separator: "\r\n", maxSplits: 1, omittingEmptySubsequences: true).first ?? ""
+        let parts = firstLine.split(separator: " ")
+        let method = parts.count >= 1 ? String(parts[0]) : "GET"
+        let path = parts.count >= 2 ? String(parts[1]) : "/"
+        return ParsedRequest(method: method, path: path, body: Data(body))
+    }
+
+    private func respond(to req: ParsedRequest) -> Data {
+        // Routing: GET endpoints first, then POST.
+        if req.method == "GET" {
+            switch req.path {
+            case "/", "/index.html":
+                return ok(body: htmlIndex(), contentType: "text/html; charset=utf-8")
+            case "/status.json":
+                return ok(body: #"{"app":"klamap","version":"1.0","status":"running"}"#,
+                          contentType: "application/json; charset=utf-8")
+            case "/api/info":
+                let info = #"{"name":"\#(UIDevice.current.name)","capabilities":["render","tendies"],"protocolVersion":1}"#
+                return ok(body: info, contentType: "application/json; charset=utf-8")
+            default:
+                return notFound()
+            }
         }
+        if req.method == "POST" {
+            switch req.path {
+            case "/api/render":
+                // Phase 5 stub. The body will be JSON describing a render job:
+                // { states: [...], captureSize: {...}, config: {...}, ... }
+                // Phase 6 will actually queue this and run ContinuousRenderEngine.
+                let payloadSize = req.body.count
+                let stub = #"""
+                {"status":"accepted","message":"Render endpoint scaffold ready. Phase 6 will execute the job.","payloadBytes":\#(payloadSize)}
+                """#
+                return ok(status: 202, statusText: "Accepted",
+                          body: stub, contentType: "application/json; charset=utf-8")
+            default:
+                return notFound()
+            }
+        }
+        return methodNotAllowed()
+    }
+
+    // MARK: - Response helpers
+
+    private func ok(status: Int = 200, statusText: String = "OK",
+                    body: String, contentType: String) -> Data {
         let bodyData = Data(body.utf8)
         let header = """
-        HTTP/1.1 200 OK\r\nContent-Type: \(contentType)\r\nContent-Length: \(bodyData.count)\r\nConnection: close\r\n\r\n
+        HTTP/1.1 \(status) \(statusText)\r\nContent-Type: \(contentType)\r\nContent-Length: \(bodyData.count)\r\nConnection: close\r\n\r\n
+        """
+        return Data(header.utf8) + bodyData
+    }
+
+    private func methodNotAllowed() -> Data {
+        let body = "405 Method Not Allowed"
+        let bodyData = Data(body.utf8)
+        let header = """
+        HTTP/1.1 405 Method Not Allowed\r\nContent-Type: text/plain\r\nContent-Length: \(bodyData.count)\r\nConnection: close\r\n\r\n
         """
         return Data(header.utf8) + bodyData
     }
