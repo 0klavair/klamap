@@ -35,7 +35,7 @@ enum RenderEngine {
 
     /// Sweet spot for MKMapSnapshotter parallelism. Going higher tends to make MapKit
     /// stall and return blank tiles intermittently.
-    static let defaultConcurrency = 4
+    nonisolated static let defaultConcurrency = 4
 
     /// Renders frames in parallel and calls `onFrame` on the main actor for each
     /// completed frame. Frames may complete out of order — callers receive (index, image).

@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import Combine
 
 /// Which map backend to use for live preview and rendering.
 enum MapProviderKind: String, CaseIterable, Identifiable, Sendable {
