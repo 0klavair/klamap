@@ -187,6 +187,10 @@ protocol LocalizationStrings {
     var help: String { get }
     var savedRestartRequired: String { get }
 
+    // Presentation mode (full-screen map + crosshair)
+    var presentationMode: String { get }
+    var clear: String { get }
+
     var cancelRender: String { get }
     var cancelling: String { get }
     var renderComplete: String { get }
@@ -505,6 +509,9 @@ struct FrenchStrings: LocalizationStrings {
     let openStyleDocs = "Documentation des styles"
     let help = "Aide"
     let savedRestartRequired = "Sauvegardé — redémarre l'app pour appliquer"
+
+    let presentationMode = "Mode présentation"
+    let clear = "Effacer"
 }
 
 struct EnglishStrings: LocalizationStrings {
@@ -740,6 +747,9 @@ struct EnglishStrings: LocalizationStrings {
     let openStyleDocs = "Style documentation"
     let help = "Help"
     let savedRestartRequired = "Saved — restart the app to apply"
+
+    let presentationMode = "Presentation mode"
+    let clear = "Clear"
 }
 
 // MARK: - Missing helpers & placeholders added for buildability
@@ -826,9 +836,15 @@ struct WallpaperMakerView: View {
         let profT: CGFloat = simulateTraffic ? trafficProfileProgress(clamped) : clamped
 
 
-        // Camera lead: la caméra regarde légèrement plus loin sur la route (effet CarPlay)
+        // Camera lead: la caméra regarde légèrement plus loin sur la route (effet CarPlay).
         // On pousse un peu plus quand on suit la route réelle pour bien voir la ligne bleue.
-        let cameraLead: CGFloat = useRoutePath ? 0.06 : 0.02
+        // CRITICAL: on TAPER le lead à zéro dans les 15 % finaux pour éviter que la caméra
+        // se "fige" à la fin de route (cameraLead overshoot) puis donne l'impression que la
+        // caméra glitche pendant que la pose continue d'interpoler. Sans tapering, profT 0.94+
+        // bloque tCamera à 1.0 alors que les paramètres caméra continuent de bouger.
+        let baseLead: CGFloat = useRoutePath ? 0.06 : 0.02
+        let leadTaper = max(0, min(1, (1 - profT) / 0.15))
+        let cameraLead = baseLead * leadTaper
         let tCamera = min(1, profT + cameraLead)
 
         let a = pointA ?? crosshairCenter ?? CLLocationCoordinate2D(latitude: 48.8566, longitude: 2.3522)
@@ -1358,6 +1374,11 @@ struct WallpaperMakerView: View {
     @State private var isBootReady = false
     @State private var bootProgress: Double = 0.0
 
+    // Presentation mode: full-screen map + crosshair, all UI chrome hidden. Useful
+    // for screen recording demos and for placing A/B with a game controller without
+    // the menus in the way.
+    @State private var presentationMode: Bool = false
+
     // Added states for rendering overlay
     @State private var showRenderOverlay = false
     @State private var renderFinished = false
@@ -1699,6 +1720,25 @@ struct WallpaperMakerView: View {
         }
     }
 
+    /// Async wrapper around recomputeRouteIfNeeded() that resolves once `routeCoordinates`
+    /// is populated (or once we know the route doesn't apply). Used at the start of
+    /// every export so the trajectory is fully loaded BEFORE we pre-compute pathStates.
+    @MainActor
+    private func ensureRouteReady() async {
+        guard useRoutePath, pointA != nil, pointB != nil else { return }
+        if routeCoordinates.count >= 2 && !isComputingRoute { return }
+
+        // Trigger fetch (if not already in flight) and poll until done.
+        if !isComputingRoute && routeCoordinates.isEmpty {
+            recomputeRouteIfNeeded()
+        }
+        // Poll for completion (max ~10 s — MKDirections rarely takes that long).
+        let deadline = Date().addingTimeInterval(10)
+        while isComputingRoute && Date() < deadline {
+            try? await Task.sleep(nanoseconds: 100_000_000) // 100 ms
+        }
+    }
+
     @MainActor
     private func recomputeRouteIfNeeded() {
         guard useRoutePath, let a = pointA, let b = pointB else {
@@ -1924,20 +1964,37 @@ struct WallpaperMakerView: View {
                 }
 
                 GlassSection(title: L.settings, icon: "gearshape") {
-                    Button {
-                        hapticButtonTap()
-                        showSettings = true
-                    } label: {
-                        VStack(spacing: 8) {
-                            Image(systemName: "gearshape.fill")
-                                .font(.largeTitle)
-                            Text(L.openSettings)
-                                .font(.body)
-                                .multilineTextAlignment(.center)
+                    HStack(spacing: 12) {
+                        Button {
+                            hapticButtonTap()
+                            showSettings = true
+                        } label: {
+                            VStack(spacing: 8) {
+                                Image(systemName: "gearshape.fill")
+                                    .font(.largeTitle)
+                                Text(L.openSettings)
+                                    .font(.body)
+                                    .multilineTextAlignment(.center)
+                            }
+                            .frame(maxWidth: .infinity, minHeight: 72)
                         }
-                        .frame(maxWidth: .infinity, minHeight: 72)
+                        .buttonStyle(GlassButtonStyle())
+
+                        Button {
+                            hapticButtonTap(style: .medium)
+                            presentationMode = true
+                        } label: {
+                            VStack(spacing: 8) {
+                                Image(systemName: "rectangle.inset.filled.and.person.filled")
+                                    .font(.largeTitle)
+                                Text(L.presentationMode)
+                                    .font(.body)
+                                    .multilineTextAlignment(.center)
+                            }
+                            .frame(maxWidth: .infinity, minHeight: 72)
+                        }
+                        .buttonStyle(GlassButtonStyle())
                     }
-                    .buttonStyle(GlassButtonStyle())
                 }
             }
             .padding(.horizontal, 12)
@@ -2010,6 +2067,9 @@ struct WallpaperMakerView: View {
             }
             .sheet(isPresented: $showSettings) {
                 settingsSheet
+            }
+            .fullScreenCover(isPresented: $presentationMode) {
+                presentationOverlay
             }
             .alert(L.experimentalHybridMode, isPresented: $showHybridWarning) {
                 Button(L.ok, role: .cancel) { }
@@ -2659,6 +2719,87 @@ struct WallpaperMakerView: View {
         }
     }
 
+    /// Full-screen take-over for screen recording demos and controller-based point
+    /// placement. Only the map + crosshair show; A/B set buttons hover at bottom,
+    /// exit button at top-right. Game controller bindings still fire (setA/setB
+    /// are wired globally) so users can place precise points without touching the UI.
+    private var presentationOverlay: some View {
+        ZStack {
+            mapPicker
+                .ignoresSafeArea()
+
+            // Coords readout
+            VStack {
+                if let c = crosshairCenter {
+                    Text(String(format: "%.5f, %.5f", c.latitude, c.longitude))
+                        .font(.system(.caption, design: .monospaced))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(.ultraThinMaterial, in: Capsule())
+                        .foregroundStyle(.primary)
+                        .padding(.top, 50)
+                }
+                Spacer()
+            }
+
+            // Exit button
+            VStack {
+                HStack {
+                    Spacer()
+                    Button {
+                        hapticButtonTap()
+                        presentationMode = false
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 36))
+                            .foregroundStyle(.white, .black.opacity(0.4))
+                            .padding(12)
+                    }
+                }
+                Spacer()
+            }
+
+            // Bottom action bar (A / B / clear)
+            VStack {
+                Spacer()
+                HStack(spacing: 14) {
+                    presentationButton(label: L.setA, icon: "a.circle", tint: .blue) { setA() }
+                    presentationButton(label: L.setB, icon: "b.circle", tint: .orange) { setB() }
+                    presentationButton(label: L.clear, icon: "arrow.counterclockwise", tint: .red) {
+                        pointA = nil
+                        pointB = nil
+                        poseA = nil
+                        poseB = nil
+                        routePolyline = nil
+                        routeCoordinates = []
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 14)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+                .padding(.horizontal, 24)
+                .padding(.bottom, 36)
+            }
+        }
+    }
+
+    private func presentationButton(label: String, icon: String, tint: Color, action: @escaping () -> Void) -> some View {
+        Button(action: {
+            hapticButtonTap()
+            action()
+        }) {
+            VStack(spacing: 4) {
+                Image(systemName: icon).font(.title3)
+                Text(label).font(.caption)
+            }
+            .frame(maxWidth: .infinity, minHeight: 44)
+            .padding(.vertical, 6)
+            .background(tint.opacity(0.20), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .foregroundStyle(.primary)
+        }
+        .buttonStyle(.plain)
+    }
+
     private var mapPicker: some View {
         ZStack(alignment: .center) {
             let start = MapCamera(
@@ -3154,9 +3295,16 @@ struct WallpaperMakerView: View {
             totalFrames = max(1, fixedFrameCount)
         }
 
-        // iPhone wallpaper standard: 390x844 points @ 3x = 1170x2532 pixels.
-        let width = 1170
-        let height = 2532
+        // iPhone wallpaper aspect (390x844 in points). Default render is @3x = 1170x2532.
+        // The oversample slider multiplies on top of that — values >1 give crisper
+        // wallpapers at the cost of file size; iOS scales them down automatically.
+        let baseW = 1170
+        let baseH = 2532
+        let width = max(390, Int(round(Double(baseW) * oversample)))
+        let height = max(844, Int(round(Double(baseH) * oversample)))
+
+        // Make sure the route is fully loaded before sampling pathStates from it.
+        await ensureRouteReady()
 
         // Pre-compute camera states upfront (same approach as exportVideoClean).
         let pathStates: [CameraState] = (0..<totalFrames).map { i in
@@ -3221,12 +3369,19 @@ struct WallpaperMakerView: View {
                 progressLabel = "\(L.frame) \(done) / \(totalFrames)"
             }
         } else {
-            // Apple path: parallel (4 MKMapSnapshotter at once, with preheat + retry)
+            // Apple path: parallel (4 MKMapSnapshotter at once, with preheat + retry).
+            // We pass the polyline so the route blue line is composited on every frame
+            // — same overlay as the live preview map.
+            let polylineLatLons: [Double]? = (useRoutePath && !routeCoordinates.isEmpty)
+                ? routeCoordinates.flatMap { [$0.latitude, $0.longitude] }
+                : nil
+
             await RenderEngine.renderFramesParallel(
                 states: pathStates,
                 width: width,
                 height: height,
                 config: config,
+                polylineLatLons: polylineLatLons,
                 cancel: { self.cancelRequested },
                 onFrame: { idx, cg in
                     let name = String(format: "%0*d.jpg", digits, idx)
@@ -3976,36 +4131,96 @@ struct WallpaperMakerView: View {
         }
         writer.startSession(atSourceTime: .zero)
 
+        // Make sure the route is fully loaded before we sample camera states from it.
+        // Otherwise pathPoint() falls back to A→B linear interp for frames computed
+        // before MKDirections finishes, causing visual stutter.
+        await ensureRouteReady()
+
         // Pré-calcul des états de caméra
-        let pathStates: [(coord: CLLocationCoordinate2D, pose: CamPose)] = (0..<totalFrames).map { i in
+        let pathStates: [CameraState] = (0..<totalFrames).map { i in
             let t = CGFloat(i) / CGFloat(max(1, totalFrames - 1))
-            return self.pathPoint(t)
+            let p = self.pathPoint(t)
+            return CameraState(coord: p.coord, distance: p.pose.distance, pitch: p.pose.pitch, heading: p.pose.heading)
         }
 
-        // Boucle séquentielle : snapshot -> pixelBuffer -> append
-        for i in 0..<totalFrames {
-            if cancelRequested { break }
+        // Snapshot config (Apple Maps).
+        let style: SnapshotConfig.Style
+        switch liveStyle {
+        case .standard: style = .standard
+        case .muted:    style = .muted
+        case .hybrid:   style = .hybrid
+        }
+        let config = SnapshotConfig(
+            style: style,
+            showPOI: showPOI,
+            hideRoadLabels: hideRoadLabels,
+            realisticElevationWhenPitched: true
+        )
 
-            let state = pathStates[i]
-            let cgOpt = await snapshotCGImage(for: state, width: width, height: height)
+        // Polyline overlay: same blue path that's drawn on the live map. Only when
+        // useRoutePath is enabled and a route was successfully fetched.
+        let polylineLatLons: [Double]? = (useRoutePath && !routeCoordinates.isEmpty)
+            ? routeCoordinates.flatMap { [$0.latitude, $0.longitude] }
+            : nil
 
-            if let cg = cgOpt {
-                if let buf = makePixelBuffer(from: cg, width: width, height: height) {
+        let mapSettings = MapProviderSettings.shared
 
+        if mapSettings.isGoogleMapsActive {
+            // Google path: sequential single-instance offscreen GMSMapView.
+            let styleJSON = mapSettings.effectiveStyleJSON
+            let buildings3D = mapSettings.useGoogleBuilding3D
+            for (idx, state) in pathStates.enumerated() {
+                if cancelRequested { break }
+                if let cg = await GoogleMapsRenderer.shared.snapshot(
+                    state: state,
+                    widthPx: width,
+                    heightPx: height,
+                    styleJSON: styleJSON,
+                    building3D: buildings3D
+                ), let buf = makePixelBuffer(from: cg, width: width, height: height) {
                     while !input.isReadyForMoreMediaData {
-                        try? await Task.sleep(nanoseconds: 2_000_000) // 2 ms
+                        try? await Task.sleep(nanoseconds: 2_000_000)
                     }
-                    let pts = CMTimeMultiply(frameDuration, multiplier: Int32(i))
+                    let pts = CMTimeMultiply(frameDuration, multiplier: Int32(idx))
                     _ = adaptor.append(buf, withPresentationTime: pts)
                 }
-            } else {
-                print("[Export] frame \(i) snapshot failed")
+                let done = idx + 1
+                renderProgress = Double(done) / Double(totalFrames)
+                progressLabel = "\(L.frame) \(done) / \(totalFrames)"
             }
+        } else {
+            // Apple path: parallel rendering with ordered writeback to AVAssetWriter.
+            // Frames may arrive out of order from the snapshot pool — buffer them
+            // in a small dictionary and drain consecutively into the asset writer.
+            var pendingFrames: [Int: CGImage] = [:]
+            var nextWriteIdx = 0
 
-            // Progress UI (only count frames, no percent text)
-            let p = Double(i + 1) / Double(totalFrames)
-            self.renderProgress = p
-            self.progressLabel = "\(L.frame) \(i + 1) / \(totalFrames)"
+            await RenderEngine.renderFramesParallel(
+                states: pathStates,
+                width: width,
+                height: height,
+                config: config,
+                polylineLatLons: polylineLatLons,
+                cancel: { self.cancelRequested },
+                onFrame: { idx, cg in
+                    pendingFrames[idx] = cg
+                    while let img = pendingFrames[nextWriteIdx] {
+                        pendingFrames.removeValue(forKey: nextWriteIdx)
+                        if let buf = self.makePixelBuffer(from: img, width: width, height: height) {
+                            while !input.isReadyForMoreMediaData {
+                                try? await Task.sleep(nanoseconds: 2_000_000)
+                            }
+                            let pts = CMTimeMultiply(frameDuration, multiplier: Int32(nextWriteIdx))
+                            _ = adaptor.append(buf, withPresentationTime: pts)
+                        }
+                        nextWriteIdx += 1
+                    }
+                },
+                onProgress: { done, total in
+                    self.renderProgress = Double(done) / Double(total)
+                    self.progressLabel = "\(self.L.frame) \(done) / \(total)"
+                }
+            )
         }
 
         // Si l'utilisateur a demandé l'annulation, on arrête proprement ici

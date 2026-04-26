@@ -39,15 +39,20 @@ enum RenderEngine {
 
     /// Renders frames in parallel and calls `onFrame` on the main actor for each
     /// completed frame. Frames may complete out of order — callers receive (index, image).
+    /// `onFrame` is async so callers can await AVAssetWriter back-pressure or disk I/O
+    /// without losing the parallelism upstream.
+    /// `polylineLatLons` (flat [lat, lon, lat, lon, ...]) is composited as a blue
+    /// stroked path on top of every frame — same overlay as the live preview map.
     @MainActor
     static func renderFramesParallel(
         states: [CameraState],
         width: Int,
         height: Int,
         config: SnapshotConfig,
+        polylineLatLons: [Double]? = nil,
         concurrency: Int = RenderEngine.defaultConcurrency,
         cancel: @escaping @MainActor () -> Bool,
-        onFrame: @escaping @MainActor (Int, CGImage) -> Void,
+        onFrame: @escaping @MainActor (Int, CGImage) async -> Void,
         onProgress: @escaping @MainActor (Int, Int) -> Void
     ) async {
         let total = states.count
@@ -75,14 +80,15 @@ enum RenderEngine {
         var nextIdx = 0
         var completed = 0
         let cap = max(1, concurrency)
+        let polyline = polylineLatLons  // capture for closures
 
         await withTaskGroup(of: (Int, CGImage?).self) { group in
-            // Local enqueue helper — captures everything by value.
             @MainActor func enqueue(_ i: Int) {
                 let s = states[i]
                 let w = width
                 let h = height
                 let cfg = config
+                let poly = polyline
                 group.addTask {
                     let cg = await RenderEngine.snapshotPure(
                         lat: s.lat, lon: s.lon,
@@ -90,11 +96,10 @@ enum RenderEngine {
                         width: w, height: h,
                         style: cfg.style, showPOI: cfg.showPOI,
                         hideRoadLabels: cfg.hideRoadLabels,
-                        realisticElevation: cfg.realisticElevationWhenPitched
+                        realisticElevation: cfg.realisticElevationWhenPitched,
+                        polylineLatLons: poly
                     )
                     if let cg = cg, RenderEngine.isLikelyBlank(cg) {
-                        // Tile cache miss — let MapKit settle, nudge the camera so
-                        // it re-evaluates the tile set, then try again.
                         try? await Task.sleep(nanoseconds: 30_000_000)
                         let retried = await RenderEngine.snapshotPure(
                             lat: s.lat, lon: s.lon,
@@ -102,7 +107,8 @@ enum RenderEngine {
                             width: w, height: h,
                             style: cfg.style, showPOI: cfg.showPOI,
                             hideRoadLabels: cfg.hideRoadLabels,
-                            realisticElevation: cfg.realisticElevationWhenPitched
+                            realisticElevation: cfg.realisticElevationWhenPitched,
+                            polylineLatLons: poly
                         )
                         return (i, retried ?? cg)
                     }
@@ -110,18 +116,16 @@ enum RenderEngine {
                 }
             }
 
-            // Initial batch.
             let initial = min(cap, total)
             for _ in 0..<initial {
                 enqueue(nextIdx)
                 nextIdx += 1
             }
 
-            // As tasks complete, deliver the frame and refill the window.
             while let (idx, cg) = await group.next() {
                 completed += 1
                 if let cg = cg {
-                    onFrame(idx, cg)
+                    await onFrame(idx, cg)
                 }
                 onProgress(completed, total)
 
@@ -158,6 +162,9 @@ enum RenderEngine {
 
     /// Pure-input snapshot worker. Takes only Sendable primitives so it can be called
     /// from any task context without crossing MapKit types across actor boundaries.
+    /// If `polylineLatLons` is provided (flat array of [lat0, lon0, lat1, lon1, ...]),
+    /// the points are projected to image coordinates and a stroked path is composited
+    /// on top of the snapshot — used to draw the CarPlay-style blue route overlay.
     nonisolated static func snapshotPure(
         lat: Double,
         lon: Double,
@@ -169,7 +176,10 @@ enum RenderEngine {
         style: SnapshotConfig.Style,
         showPOI: Bool,
         hideRoadLabels: Bool,
-        realisticElevation: Bool
+        realisticElevation: Bool,
+        polylineLatLons: [Double]? = nil,
+        polylineColorRGBA: (Double, Double, Double, Double) = (0, 122.0/255.0, 1, 1),
+        polylineWidth: Double = 5
     ) async -> CGImage? {
         let safeDistance = guardDistance(distance, pitch: pitch)
         let safePitch = guardPitch(pitch)
@@ -203,7 +213,50 @@ enum RenderEngine {
         let snap = MKMapSnapshotter(options: opts)
         return await withCheckedContinuation { (cont: CheckedContinuation<CGImage?, Never>) in
             snap.start(with: DispatchQueue.global(qos: .userInitiated)) { snapshot, _ in
-                cont.resume(returning: snapshot?.image.cgImage)
+                guard let snapshot = snapshot else {
+                    cont.resume(returning: nil)
+                    return
+                }
+
+                // No polyline → just hand back the raw snapshot.
+                guard let coords = polylineLatLons, coords.count >= 4 else {
+                    cont.resume(returning: snapshot.image.cgImage)
+                    return
+                }
+
+                // Composite the polyline onto the snapshot. snapshot.point(for:)
+                // is the only way to project geo coords onto image space and lives
+                // on the snapshot object, so we have to do this here.
+                let baseImage = snapshot.image
+                UIGraphicsBeginImageContextWithOptions(baseImage.size, true, baseImage.scale)
+                baseImage.draw(at: .zero)
+                if let ctx = UIGraphicsGetCurrentContext() {
+                    let (r, g, b, a) = polylineColorRGBA
+                    ctx.setStrokeColor(UIColor(red: CGFloat(r), green: CGFloat(g), blue: CGFloat(b), alpha: CGFloat(a)).cgColor)
+                    ctx.setLineWidth(CGFloat(polylineWidth))
+                    ctx.setLineJoin(.round)
+                    ctx.setLineCap(.round)
+                    let bounds = CGRect(origin: .zero, size: baseImage.size)
+                    var didMove = false
+                    var i = 0
+                    while i + 1 < coords.count {
+                        let c = CLLocationCoordinate2D(latitude: coords[i], longitude: coords[i + 1])
+                        let pt = snapshot.point(for: c)
+                        if bounds.contains(pt) {
+                            if !didMove {
+                                ctx.move(to: pt)
+                                didMove = true
+                            } else {
+                                ctx.addLine(to: pt)
+                            }
+                        }
+                        i += 2
+                    }
+                    ctx.strokePath()
+                }
+                let composited = UIGraphicsGetImageFromCurrentImageContext()
+                UIGraphicsEndImageContext()
+                cont.resume(returning: composited?.cgImage ?? baseImage.cgImage)
             }
         }
     }
@@ -298,20 +351,20 @@ enum RenderEngine {
         return nil
     }
 
-    /// Don't allow the camera to dive below the ground — that's what produces the
-    /// "flying through the void" look at high pitch + tiny distance.
+    /// Sanitize distance against NaN/zero/negative. We deliberately do NOT impose a
+    /// pitch-based minimum here: users want to be able to dive close to the ground
+    /// for cinematic shots, and MapKit itself caps things at the terrain surface.
     nonisolated static func guardDistance(
         _ distance: Double,
         pitch: Double
     ) -> Double {
         guard distance.isFinite, distance > 0 else { return 500 }
-        let pitchClamped = min(80, max(0, pitch))
-        let minByPitch = 80 + pitchClamped * 6
-        return max(minByPitch, distance)
+        return max(20, distance)  // 20 m floor — below that MapKit clips into terrain
     }
 
     nonisolated static func guardPitch(_ pitch: Double) -> Double {
         guard pitch.isFinite else { return 45 }
-        return min(80, max(0, pitch))
+        // MKMapCamera tops out around 85° in practice; above that the horizon flips.
+        return min(85, max(0, pitch))
     }
 }
