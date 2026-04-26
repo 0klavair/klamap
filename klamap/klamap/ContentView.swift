@@ -3515,8 +3515,10 @@ struct WallpaperMakerView: View {
                     pointB: pointB,
                     onCameraChange: { cam in
                         crosshairCenter = cam.centerCoordinate
+                        // MKMapCamera (UIKit) uses centerCoordinateDistance,
+                        // SwiftUI's MapCamera uses .distance — different types.
                         currentPose = CamPose(
-                            distance: cam.distance,
+                            distance: cam.centerCoordinateDistance,
                             pitch: cam.pitch,
                             heading: cam.heading
                         )
@@ -3617,11 +3619,11 @@ struct WallpaperMakerView: View {
                     heading: currentPose.heading
                 )
             },
-            set: { newCam in
+            set: { (newCam: MKMapCamera) in
                 // RenderHostView writes back when the user pans/zooms.
                 crosshairCenter = newCam.centerCoordinate
                 currentPose = CamPose(
-                    distance: newCam.distance,
+                    distance: newCam.centerCoordinateDistance,
                     pitch: newCam.pitch,
                     heading: newCam.heading
                 )
