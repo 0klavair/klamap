@@ -198,6 +198,9 @@ protocol LocalizationStrings {
     var serverModeFooter: String { get }
     var enableServer: String { get }
     var serverURL: String { get }
+    var serverDisplayMode: String { get }
+    var serverDisplayHint: String { get }
+    var serverNotRunning: String { get }
 
     var cancelRender: String { get }
     var cancelling: String { get }
@@ -527,6 +530,9 @@ struct FrenchStrings: LocalizationStrings {
     let serverModeFooter = "Active le serveur HTTP local. D'autres appareils sur le même Wi-Fi peuvent ouvrir l'URL pour utiliser klamap depuis un navigateur."
     let enableServer = "Activer le serveur"
     let serverURL = "URL"
+    let serverDisplayMode = "Affichage URL plein écran"
+    let serverDisplayHint = "Touche le X en haut à droite pour quitter. Combinable avec le mode présentation."
+    let serverNotRunning = "Serveur non démarré"
 }
 
 struct EnglishStrings: LocalizationStrings {
@@ -772,6 +778,9 @@ struct EnglishStrings: LocalizationStrings {
     let serverModeFooter = "Starts a local HTTP server. Other devices on the same Wi-Fi can open the URL to use klamap from a browser."
     let enableServer = "Enable server"
     let serverURL = "URL"
+    let serverDisplayMode = "Full-screen URL display"
+    let serverDisplayHint = "Tap X top-right to exit. Combinable with presentation mode."
+    let serverNotRunning = "Server not started"
 }
 
 // MARK: - Missing helpers & placeholders added for buildability
@@ -1401,6 +1410,13 @@ struct WallpaperMakerView: View {
     // for screen recording demos and for placing A/B with a game controller without
     // the menus in the way.
     @State private var presentationMode: Bool = false
+
+    // Server display mode: when the local HTTP server is running, show a black
+    // full-screen with the URL in big type so the iPhone can act as a stationary
+    // "render server" visible from across the room. Combinable with presentationMode
+    // (when both are on, presentation takes the screen and a small URL banner pins
+    // to the top).
+    @State private var serverDisplayMode: Bool = false
 
     // Added states for rendering overlay
     @State private var showRenderOverlay = false
@@ -2198,8 +2214,16 @@ struct WallpaperMakerView: View {
             .sheet(isPresented: $showSettings) {
                 settingsSheet
             }
-            .fullScreenCover(isPresented: $presentationMode) {
-                presentationOverlay
+            .fullScreenCover(isPresented: Binding(
+                get: { presentationMode || serverDisplayMode },
+                set: { newVal in
+                    if !newVal {
+                        presentationMode = false
+                        serverDisplayMode = false
+                    }
+                }
+            )) {
+                fullscreenOverlay
             }
             .alert(L.experimentalHybridMode, isPresented: $showHybridWarning) {
                 Button(L.ok, role: .cancel) { }
@@ -2275,6 +2299,14 @@ struct WallpaperMakerView: View {
                             .font(.footnote)
                             .foregroundStyle(.red)
                     }
+
+                    // Big black-screen kiosk mode showing the URL — combinable with
+                    // presentation mode (when both are on, URL appears as a banner
+                    // on top of the live map).
+                    Toggle(isOn: $serverDisplayMode) {
+                        Label(L.serverDisplayMode, systemImage: "rectangle.inset.fill")
+                    }
+                    .disabled(!LocalHTTPServer.shared.isRunning)
                 }
                 Section(header: Text(L.controllerSettings)) {
                     HStack {
@@ -2951,6 +2983,80 @@ struct WallpaperMakerView: View {
         }
     }
 
+    /// Routes to the right full-screen view based on which mode(s) are active.
+    /// presentationMode wins for layout (you still see the map). serverDisplayMode
+    /// adds a URL banner at the top when both are on, OR takes over with a black
+    /// "kiosk" view when it's the only mode active.
+    @ViewBuilder
+    private var fullscreenOverlay: some View {
+        if presentationMode {
+            presentationOverlay
+        } else if serverDisplayMode {
+            serverDisplayOverlay
+        }
+    }
+
+    /// Black "kiosk" screen with the server URL in big type. Designed to be
+    /// readable from across the room when the iPhone is sitting on a desk
+    /// acting as a render server.
+    private var serverDisplayOverlay: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+
+            VStack(spacing: 24) {
+                Image(systemName: "server.rack")
+                    .font(.system(size: 64))
+                    .foregroundStyle(.white.opacity(0.7))
+
+                Text(L.serverModeTitle)
+                    .font(.system(size: 28, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.85))
+
+                if let url = LocalHTTPServer.shared.url {
+                    Text(url)
+                        .font(.system(.largeTitle, design: .monospaced).weight(.bold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 24)
+                        .padding(.vertical, 18)
+                        .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .stroke(.white.opacity(0.2))
+                        )
+                        .multilineTextAlignment(.center)
+                        .textSelection(.enabled)
+                } else {
+                    Text(L.serverNotRunning)
+                        .font(.headline)
+                        .foregroundStyle(.red)
+                }
+
+                Text(L.serverDisplayHint)
+                    .font(.footnote)
+                    .foregroundStyle(.white.opacity(0.5))
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 32)
+            }
+
+            // Exit button
+            VStack {
+                HStack {
+                    Spacer()
+                    Button {
+                        hapticButtonTap()
+                        serverDisplayMode = false
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 36))
+                            .foregroundStyle(.white, .white.opacity(0.15))
+                            .padding(12)
+                    }
+                }
+                Spacer()
+            }
+        }
+    }
+
     /// Full-screen take-over for screen recording demos and controller-based point
     /// placement. Only the map + crosshair show; A/B set buttons hover at bottom,
     /// exit button at top-right. Game controller bindings still fire (setA/setB
@@ -2960,8 +3066,21 @@ struct WallpaperMakerView: View {
             mapPicker
                 .ignoresSafeArea()
 
-            // Coords readout
-            VStack {
+            // Coords readout (+ optional URL banner when server display mode is also on)
+            VStack(spacing: 6) {
+                if serverDisplayMode, let url = LocalHTTPServer.shared.url {
+                    HStack(spacing: 6) {
+                        Image(systemName: "server.rack").font(.caption)
+                        Text(url)
+                            .font(.system(.caption, design: .monospaced))
+                            .textSelection(.enabled)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .foregroundStyle(.primary)
+                    .padding(.top, 50)
+                }
                 if let c = crosshairCenter {
                     Text(String(format: "%.5f, %.5f", c.latitude, c.longitude))
                         .font(.system(.caption, design: .monospaced))
@@ -2969,7 +3088,7 @@ struct WallpaperMakerView: View {
                         .padding(.vertical, 6)
                         .background(.ultraThinMaterial, in: Capsule())
                         .foregroundStyle(.primary)
-                        .padding(.top, 50)
+                        .padding(.top, serverDisplayMode ? 0 : 50)
                 }
                 Spacer()
             }

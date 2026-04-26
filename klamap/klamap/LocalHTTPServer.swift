@@ -30,7 +30,9 @@ final class LocalHTTPServer: ObservableObject {
             params.allowLocalEndpointReuse = true
             let listener = try NWListener(using: params, on: port)
             listener.newConnectionHandler = { [weak self] conn in
-                self?.handle(conn)
+                Task { @MainActor in
+                    self?.handle(conn)
+                }
             }
             listener.stateUpdateHandler = { [weak self] state in
                 Task { @MainActor in
