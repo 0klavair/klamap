@@ -202,6 +202,21 @@ protocol LocalizationStrings {
     var serverDisplayHint: String { get }
     var serverNotRunning: String { get }
 
+    // Renamed / clarified server modes (separate web from render server)
+    var webModeTitle: String { get }
+    var webModeFooter: String { get }
+    var enableWebServer: String { get }
+    var renderServerTitle: String { get }
+    var renderServerFooter: String { get }
+    var connectToServer: String { get }
+    var comingSoon: String { get }
+
+    // Debug + camera path
+    var debug: String { get }
+    var cameraPathLogs: String { get }
+    var shareLastLog: String { get }
+    var stabilizeEnd: String { get }
+
     var cancelRender: String { get }
     var cancelling: String { get }
     var renderComplete: String { get }
@@ -533,6 +548,19 @@ struct FrenchStrings: LocalizationStrings {
     let serverDisplayMode = "Affichage URL plein écran"
     let serverDisplayHint = "Touche le X en haut à droite pour quitter. Combinable avec le mode présentation."
     let serverNotRunning = "Serveur non démarré"
+
+    let webModeTitle = "Mode site web"
+    let webModeFooter = "Lance un serveur web local. Tu peux ouvrir l'URL depuis n'importe quel navigateur sur le même Wi-Fi pour utiliser klamap."
+    let enableWebServer = "Activer le site web"
+    let renderServerTitle = "Serveur de rendu"
+    let renderServerFooter = "Permet à un autre iPhone du réseau d'envoyer des rendus à exécuter ici. Plus rapide quand le serveur est plus puissant."
+    let connectToServer = "Se connecter à un serveur"
+    let comingSoon = "À venir"
+
+    let debug = "Debug"
+    let cameraPathLogs = "Logs trajectoire caméra"
+    let shareLastLog = "Partager le dernier log"
+    let stabilizeEnd = "Stabiliser la fin (recommandé)"
 }
 
 struct EnglishStrings: LocalizationStrings {
@@ -781,6 +809,19 @@ struct EnglishStrings: LocalizationStrings {
     let serverDisplayMode = "Full-screen URL display"
     let serverDisplayHint = "Tap X top-right to exit. Combinable with presentation mode."
     let serverNotRunning = "Server not started"
+
+    let webModeTitle = "Web mode"
+    let webModeFooter = "Starts a local web server. Open the URL from any browser on the same Wi-Fi to use klamap."
+    let enableWebServer = "Enable web server"
+    let renderServerTitle = "Render server"
+    let renderServerFooter = "Lets another iPhone on the network submit render jobs to run here. Faster when the server is more powerful."
+    let connectToServer = "Connect to a server"
+    let comingSoon = "Coming soon"
+
+    let debug = "Debug"
+    let cameraPathLogs = "Camera path logs"
+    let shareLastLog = "Share last log"
+    let stabilizeEnd = "Stabilize end (recommended)"
 }
 
 // MARK: - Missing helpers & placeholders added for buildability
@@ -1458,6 +1499,18 @@ struct WallpaperMakerView: View {
     /// Selected post-processing color filter applied to every exported frame.
     @State private var selectedFilter: RenderFilter = .none
 
+    /// When on, the trajectory's last 10% is trimmed so the video never reaches
+    /// the buggy end-of-route region. The user's clever workaround for the
+    /// trembling that hybrid+realistic 3D mode shows in the last few frames.
+    /// Default ON because the bug is most visible exactly there.
+    @AppStorage("trimEndFrames") private var trimEndFrames: Bool = true
+
+    /// When on, every pathPoint() result is written to a CSV log under tmp/.
+    /// Lets the user (or me) see the exact camera trajectory, helps diagnose
+    /// "wait, why does my camera do that".
+    @AppStorage("cameraPathLogs") private var cameraPathLogs: Bool = false
+    @State private var lastCameraLogURL: URL? = nil
+
     /// Apply preset values to the relevant state vars. Distance/heading are left
     /// to the user's current map view (the preset doesn't yank the camera off the
     /// area they were exploring).
@@ -1866,6 +1919,41 @@ struct WallpaperMakerView: View {
         }
     }
 
+    /// Builds the camera path for an export. Centralizes:
+    /// - End-trim (skips last 10% of profT to avoid the hybrid-3D end glitch)
+    /// - Optional CSV logging of every frame's camera state
+    @MainActor
+    private func buildPathStates(totalFrames: Int) -> [CameraState] {
+        let endRatio: CGFloat = trimEndFrames ? 0.90 : 1.0  // visible profT max
+        let states: [CameraState] = (0..<totalFrames).map { i in
+            let raw = CGFloat(i) / CGFloat(max(1, totalFrames - 1))
+            let t = raw * endRatio
+            let p = self.pathPoint(t)
+            return CameraState(coord: p.coord, distance: p.pose.distance, pitch: p.pose.pitch, heading: p.pose.heading)
+        }
+        if cameraPathLogs {
+            writeCameraLog(states: states, endRatio: endRatio)
+        }
+        return states
+    }
+
+    @MainActor
+    private func writeCameraLog(states: [CameraState], endRatio: CGFloat) {
+        var csv = "idx,profT,lat,lon,distance,pitch,heading\n"
+        let total = max(1, states.count - 1)
+        for (i, s) in states.enumerated() {
+            let raw = Double(i) / Double(total)
+            let t = raw * Double(endRatio)
+            csv += String(format: "%d,%.6f,%.7f,%.7f,%.2f,%.2f,%.2f\n",
+                          i, t, s.lat, s.lon, s.distance, s.pitch, s.heading)
+        }
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("camera-path-\(UUID().uuidString.prefix(8)).csv")
+        try? csv.write(to: url, atomically: true, encoding: .utf8)
+        lastCameraLogURL = url
+        print("[CameraLog] wrote \(states.count) states to \(url.path)")
+    }
+
     /// Async wrapper around recomputeRouteIfNeeded() that resolves once `routeCoordinates`
     /// is populated (or once we know the route doesn't apply). Used at the start of
     /// every export so the trajectory is fully loaded BEFORE we pre-compute pathStates.
@@ -2271,7 +2359,22 @@ struct WallpaperMakerView: View {
                     }
                 }
 
-                Section(header: Text(L.serverModeTitle), footer: Text(L.serverModeFooter)) {
+                Section(header: Text(L.debug)) {
+                    Toggle(isOn: $cameraPathLogs) {
+                        Label(L.cameraPathLogs, systemImage: "doc.text.magnifyingglass")
+                    }
+                    if let url = lastCameraLogURL {
+                        Button {
+                            hapticButtonTap()
+                            presetToShareURL = url
+                            showShareSheet = true
+                        } label: {
+                            Label(L.shareLastLog, systemImage: "square.and.arrow.up")
+                        }
+                    }
+                }
+
+                Section(header: Text(L.webModeTitle), footer: Text(L.webModeFooter)) {
                     Toggle(isOn: Binding(
                         get: { LocalHTTPServer.shared.isRunning },
                         set: { newVal in
@@ -2282,7 +2385,7 @@ struct WallpaperMakerView: View {
                             }
                         }
                     )) {
-                        Label(L.enableServer, systemImage: "server.rack")
+                        Label(L.enableWebServer, systemImage: "globe")
                     }
                     if let url = LocalHTTPServer.shared.url {
                         HStack {
@@ -2307,6 +2410,23 @@ struct WallpaperMakerView: View {
                         Label(L.serverDisplayMode, systemImage: "rectangle.inset.fill")
                     }
                     .disabled(!LocalHTTPServer.shared.isRunning)
+                }
+
+                Section(header: Text(L.renderServerTitle), footer: Text(L.renderServerFooter)) {
+                    HStack {
+                        Label(L.renderServerTitle, systemImage: "server.rack")
+                        Spacer()
+                        Text(L.comingSoon)
+                            .font(.footnote)
+                            .foregroundStyle(.orange)
+                    }
+                    HStack {
+                        Label(L.connectToServer, systemImage: "link")
+                        Spacer()
+                        Text(L.comingSoon)
+                            .font(.footnote)
+                            .foregroundStyle(.orange)
+                    }
                 }
                 Section(header: Text(L.controllerSettings)) {
                     HStack {
@@ -2763,6 +2883,9 @@ struct WallpaperMakerView: View {
             }
             .padding(.bottom, 4)
 
+            Toggle(L.stabilizeEnd, isOn: $trimEndFrames)
+                .toggleStyle(.switch)
+
             Toggle(L.followRealRoute, isOn: $useRoutePath)
                 .onChange(of: useRoutePath) { _, newVal in
                     if newVal {
@@ -3004,11 +3127,11 @@ struct WallpaperMakerView: View {
             Color.black.ignoresSafeArea()
 
             VStack(spacing: 24) {
-                Image(systemName: "server.rack")
+                Image(systemName: "globe")
                     .font(.system(size: 64))
                     .foregroundStyle(.white.opacity(0.7))
 
-                Text(L.serverModeTitle)
+                Text(L.webModeTitle)
                     .font(.system(size: 28, weight: .medium))
                     .foregroundStyle(.white.opacity(0.85))
 
@@ -3657,17 +3780,8 @@ struct WallpaperMakerView: View {
         // Make sure the route is fully loaded before sampling pathStates from it.
         await ensureRouteReady()
 
-        // Pre-compute camera states upfront (same approach as exportVideoClean).
-        let pathStates: [CameraState] = (0..<totalFrames).map { i in
-            let t = CGFloat(i) / CGFloat(max(1, totalFrames - 1))
-            let p = self.pathPoint(t)
-            return CameraState(
-                coord: p.coord,
-                distance: p.pose.distance,
-                pitch: p.pose.pitch,
-                heading: p.pose.heading
-            )
-        }
+        // Pre-compute camera states (centralized: handles end-trim + CSV logging).
+        let pathStates: [CameraState] = buildPathStates(totalFrames: totalFrames)
 
         let style: SnapshotConfig.Style
         switch liveStyle {
@@ -4489,12 +4603,8 @@ struct WallpaperMakerView: View {
         // before MKDirections finishes, causing visual stutter.
         await ensureRouteReady()
 
-        // Pré-calcul des états de caméra
-        let pathStates: [CameraState] = (0..<totalFrames).map { i in
-            let t = CGFloat(i) / CGFloat(max(1, totalFrames - 1))
-            let p = self.pathPoint(t)
-            return CameraState(coord: p.coord, distance: p.pose.distance, pitch: p.pose.pitch, heading: p.pose.heading)
-        }
+        // Pré-calcul des états de caméra (centralisé: trim de fin + log CSV optionnel).
+        let pathStates: [CameraState] = buildPathStates(totalFrames: totalFrames)
 
         // Snapshot config (Apple Maps).
         let style: SnapshotConfig.Style
