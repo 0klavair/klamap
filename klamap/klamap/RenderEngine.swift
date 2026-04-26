@@ -298,7 +298,7 @@ enum RenderEngine {
             heading: safeHeading
         )
 
-        if #available(iOS 16, *) {
+        if #available(iOS 17, *) {
             let elev: MKStandardMapConfiguration.ElevationStyle =
                 (realisticElevation && safePitch > 1) ? .realistic : .flat
             switch style {

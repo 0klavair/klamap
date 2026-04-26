@@ -829,6 +829,7 @@ struct EnglishStrings: LocalizationStrings {
 // Generic helper stubs and placeholders to fix unresolved identifiers
 fileprivate func oversampleOptions() -> [Double] { [1.0, 1.25, 1.5, 2.0, 3.0, 4.0, 5.0] }
 
+@available(iOS 17, *)
 fileprivate func mapStyleForLive(_ style: WallpaperMakerView.LiveMapStyle = .standard) -> MapStyle {
     if #available(iOS 17, *) {
         switch style {
@@ -1972,39 +1973,60 @@ struct WallpaperMakerView: View {
         }
     }
 
+    /// Returns how many extra "hold" frames we add at the end of every export.
+    /// User's revised idea: don't cut the video before the end of the route —
+    /// instead, RENDER MORE FRAMES that sit frozen at the destination. The
+    /// extras let the eye settle on the end while smoothing perception of the
+    /// last-frame glitch (continuous still image dominates over single jolt).
+    private var endHoldFrameCount: Int {
+        // Disabled → 0. Enabled → ~12.5% of totalFrames, min 12.
+        guard trimEndFrames else { return 0 }
+        let totalFrames: Int
+        switch frameCountMode {
+        case .duration: totalFrames = max(1, seconds * max(1, fps))
+        case .fixedFrames: totalFrames = max(1, fixedFrameCount)
+        }
+        return max(12, totalFrames / 8)
+    }
+
     /// Builds the camera path for an export. Centralizes:
-    /// - End-trim (skips last 10% of profT to avoid the hybrid-3D end glitch)
+    /// - End-hold (adds extra frames at profT=1.0 so the video continues past
+    ///   the route and the glitch becomes a less visible blip)
     /// - Optional CSV logging of every frame's camera state
+    /// Returns total = totalFrames + endHoldFrameCount.
     @MainActor
     private func buildPathStates(totalFrames: Int) -> [CameraState] {
-        let endRatio: CGFloat = trimEndFrames ? 0.90 : 1.0  // visible profT max
-        let states: [CameraState] = (0..<totalFrames).map { i in
-            let raw = CGFloat(i) / CGFloat(max(1, totalFrames - 1))
-            let t = raw * endRatio
+        let extraHold = endHoldFrameCount
+        let effectiveTotal = totalFrames + extraHold
+        let states: [CameraState] = (0..<effectiveTotal).map { i in
+            // Frames 0..<totalFrames cover profT 0..1.0 (full route).
+            // Frames totalFrames..<effectiveTotal stay at profT=1.0 (frozen at end).
+            let clampedIdx = min(i, totalFrames - 1)
+            let t = CGFloat(clampedIdx) / CGFloat(max(1, totalFrames - 1))
             let p = self.pathPoint(t)
             return CameraState(coord: p.coord, distance: p.pose.distance, pitch: p.pose.pitch, heading: p.pose.heading)
         }
         if cameraPathLogs {
-            writeCameraLog(states: states, endRatio: endRatio)
+            writeCameraLog(states: states, totalFrames: totalFrames, extraHold: extraHold)
         }
         return states
     }
 
     @MainActor
-    private func writeCameraLog(states: [CameraState], endRatio: CGFloat) {
-        var csv = "idx,profT,lat,lon,distance,pitch,heading\n"
-        let total = max(1, states.count - 1)
+    private func writeCameraLog(states: [CameraState], totalFrames: Int, extraHold: Int) {
+        var csv = "idx,profT,kind,lat,lon,distance,pitch,heading\n"
         for (i, s) in states.enumerated() {
-            let raw = Double(i) / Double(total)
-            let t = raw * Double(endRatio)
-            csv += String(format: "%d,%.6f,%.7f,%.7f,%.2f,%.2f,%.2f\n",
-                          i, t, s.lat, s.lon, s.distance, s.pitch, s.heading)
+            let clampedIdx = min(i, totalFrames - 1)
+            let t = Double(clampedIdx) / Double(max(1, totalFrames - 1))
+            let kind = (i < totalFrames) ? "route" : "hold"
+            csv += String(format: "%d,%.6f,%@,%.7f,%.7f,%.2f,%.2f,%.2f\n",
+                          i, t, kind, s.lat, s.lon, s.distance, s.pitch, s.heading)
         }
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("camera-path-\(UUID().uuidString.prefix(8)).csv")
         try? csv.write(to: url, atomically: true, encoding: .utf8)
         lastCameraLogURL = url
-        print("[CameraLog] wrote \(states.count) states to \(url.path)")
+        print("[CameraLog] wrote \(states.count) states (\(totalFrames) route + \(extraHold) hold) to \(url.path)")
     }
 
     /// Async wrapper around recomputeRouteIfNeeded() that resolves once `routeCoordinates`
@@ -3861,7 +3883,8 @@ struct WallpaperMakerView: View {
         }
         defer { try? FileManager.default.removeItem(at: frameDir) }
 
-        let digits = max(3, String(totalFrames).count)
+        // Digit width must accommodate the LARGEST possible index (route + hold).
+        let digits = max(3, String(pathStates.count).count)
 
         progressLabel = L.tendiesRendering
         let mapSettings = MapProviderSettings.shared
@@ -3923,15 +3946,19 @@ struct WallpaperMakerView: View {
         }
 
         // Sanity check: make sure every frame landed.
+        // Effective count includes hold frames, if enabled. Validate against that.
+        let expectedFrameCount = pathStates.count
         let writtenCount = (try? FileManager.default.contentsOfDirectory(at: frameDir, includingPropertiesForKeys: nil).count) ?? 0
-        guard writtenCount == totalFrames else {
-            errorText = "\(L.tendiesError): \(writtenCount)/\(totalFrames) frames"
+        guard writtenCount == expectedFrameCount else {
+            errorText = "\(L.tendiesError): \(writtenCount)/\(expectedFrameCount) frames"
             showRenderOverlay = false
             return
         }
 
         progressLabel = L.tendiesPackaging
-        let duration = Double(totalFrames) / Double(fps_local)
+        // Duration covers ALL rendered frames (route + hold), so the wallpaper
+        // animation includes the destination "rest" period.
+        let duration = Double(expectedFrameCount) / Double(fps_local)
         let params = TendiesParams(
             name: "klamap-wallpaper",
             width: 390,
@@ -4025,7 +4052,8 @@ struct WallpaperMakerView: View {
         }
 
         // Nombre de chiffres pour le nommage : 001.png, 002.png, etc.
-        let digits = max(3, String(totalFrames).count)
+        // Digit width must accommodate the LARGEST possible index (route + hold).
+        let digits = max(3, String(pathStates.count).count)
 
         for i in 0..<totalFrames {
             if cancelRequested {
@@ -5072,6 +5100,7 @@ fileprivate func saveImageDataToPhotos(_ data: Data, uti: UTType) async throws {
 }
 
 // Encode UIImage to the selected format
+@available(iOS 17, *)
 fileprivate func imageData(for image: UIImage, format: WallpaperMakerView.ImageFormat, quality: Double, pngCompressionLevel: Int) -> (Data, UTType)? {
     switch format {
     case .png:

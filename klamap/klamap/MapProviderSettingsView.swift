@@ -57,7 +57,9 @@ struct MapProviderSettingsView: View {
                 }
             }
             .pickerStyle(.segmented)
-            .onChange(of: settings.provider) { _, newValue in
+            .onChange(of: settings.provider) { newValue in
+                // iOS 16-compatible single-arg form. iOS 17+ has (oldValue, newValue);
+                // sticking with the deprecated-on-17 single-arg form keeps both.
                 if newValue == .googleMaps && !settings.acceptedGoogleTOS {
                     showWarning = true
                 }

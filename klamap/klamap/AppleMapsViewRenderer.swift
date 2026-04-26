@@ -114,7 +114,7 @@ final class AppleMapsViewRenderer: NSObject {
 
     private func configure(config: SnapshotConfig) {
         guard let m = mapView else { return }
-        if #available(iOS 16, *) {
+        if #available(iOS 17, *) {
             let elev: MKStandardMapConfiguration.ElevationStyle =
                 config.realisticElevationWhenPitched ? .realistic : .flat
             switch config.style {
