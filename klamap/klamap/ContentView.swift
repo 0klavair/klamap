@@ -4052,8 +4052,8 @@ struct WallpaperMakerView: View {
         }
 
         // Nombre de chiffres pour le nommage : 001.png, 002.png, etc.
-        // Digit width must accommodate the LARGEST possible index (route + hold).
-        let digits = max(3, String(pathStates.count).count)
+        // exportImageSequence is the legacy ZIP path — no end-hold extras here.
+        let digits = max(3, String(totalFrames).count)
 
         for i in 0..<totalFrames {
             if cancelRequested {
