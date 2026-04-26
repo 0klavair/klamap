@@ -108,9 +108,22 @@ final class SharedMapViewRegistry {
         isOwnedByCapture = false
     }
 
+    private var lastAppliedConfig: SnapshotConfig?
+
     /// Apply a snapshot configuration (style, POI, hide labels, elevation) to
-    /// the shared view. Called by both the preview and the renderer.
+    /// the shared view. Diffs against the last applied config — re-applying
+    /// the same MKStandardMapConfiguration triggers a tile reload, so we skip
+    /// it if nothing actually changed.
     func applyConfig(_ config: SnapshotConfig) {
+        if let last = lastAppliedConfig,
+           last.style == config.style,
+           last.showPOI == config.showPOI,
+           last.hideRoadLabels == config.hideRoadLabels,
+           last.realisticElevationWhenPitched == config.realisticElevationWhenPitched {
+            return
+        }
+        lastAppliedConfig = config
+
         if #available(iOS 17, *) {
             let elev: MKStandardMapConfiguration.ElevationStyle =
                 config.realisticElevationWhenPitched ? .realistic : .flat
@@ -129,8 +142,14 @@ final class SharedMapViewRegistry {
         }
     }
 
+    private var lastPolylineHash: Int?
+
     /// Replace the route polyline overlay with a fresh one. Pass nil to clear.
+    /// Diffs by hash so we don't flicker the polyline on every UI re-render.
     func setPolyline(_ coords: [CLLocationCoordinate2D]?) {
+        let h = polylineHash(coords)
+        if h == lastPolylineHash { return }
+        lastPolylineHash = h
         view.removeOverlays(view.overlays)
         if let coords = coords, coords.count >= 2 {
             let poly = MKPolyline(coordinates: coords, count: coords.count)
@@ -138,20 +157,69 @@ final class SharedMapViewRegistry {
         }
     }
 
-    /// Replace the A/B annotations.
+    private func polylineHash(_ coords: [CLLocationCoordinate2D]?) -> Int {
+        guard let coords = coords, !coords.isEmpty else { return 0 }
+        var h = Hasher()
+        h.combine(coords.count)
+        h.combine(coords.first?.latitude ?? 0)
+        h.combine(coords.first?.longitude ?? 0)
+        h.combine(coords.last?.latitude ?? 0)
+        h.combine(coords.last?.longitude ?? 0)
+        if coords.count > 2 {
+            let mid = coords[coords.count / 2]
+            h.combine(mid.latitude)
+            h.combine(mid.longitude)
+        }
+        return h.finalize()
+    }
+
+    /// Replace the A/B annotations — diffs against current state to avoid flicker.
+    /// Uses LabeledPointAnnotation so the delegate's viewFor renders styled pins.
     func setAnnotations(pointA: CLLocationCoordinate2D?, pointB: CLLocationCoordinate2D?) {
-        view.removeAnnotations(view.annotations)
+        let existingByLabel: [String: LabeledPointAnnotation] = Dictionary(
+            uniqueKeysWithValues: view.annotations.compactMap { ($0 as? LabeledPointAnnotation).map { ($0.label, $0) } }
+        )
+
+        // A
         if let a = pointA {
-            let ann = MKPointAnnotation()
-            ann.coordinate = a
-            ann.title = "A"
-            view.addAnnotation(ann)
+            if let existing = existingByLabel["A"] {
+                if existing.coordinate.latitude != a.latitude || existing.coordinate.longitude != a.longitude {
+                    existing.coordinate = a
+                }
+            } else {
+                let ann = LabeledPointAnnotation(label: "A")
+                ann.coordinate = a
+                view.addAnnotation(ann)
+            }
+        } else if let existing = existingByLabel["A"] {
+            view.removeAnnotation(existing)
         }
+
+        // B
         if let b = pointB {
-            let ann = MKPointAnnotation()
-            ann.coordinate = b
-            ann.title = "B"
-            view.addAnnotation(ann)
+            if let existing = existingByLabel["B"] {
+                if existing.coordinate.latitude != b.latitude || existing.coordinate.longitude != b.longitude {
+                    existing.coordinate = b
+                }
+            } else {
+                let ann = LabeledPointAnnotation(label: "B")
+                ann.coordinate = b
+                view.addAnnotation(ann)
+            }
+        } else if let existing = existingByLabel["B"] {
+            view.removeAnnotation(existing)
         }
+    }
+}
+
+/// MKPointAnnotation subclass that carries an "A"/"B" label so the delegate's
+/// viewFor method can render styled pins per role (instead of the default
+/// red MKPinAnnotation with no label).
+final class LabeledPointAnnotation: MKPointAnnotation {
+    let label: String
+    init(label: String) {
+        self.label = label
+        super.init()
+        self.title = label
     }
 }

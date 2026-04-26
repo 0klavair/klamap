@@ -59,14 +59,50 @@ struct RenderHostView: UIViewRepresentable {
             self.parent = parent
         }
 
-        nonisolated func mapView(_ mapView: MKMapView, regionDidChangeAnimated animated: Bool) {
-            // Forward changes to whoever is listening (the editor).
+        // Camera change tracking. regionDidChangeAnimated alone misses pure-camera
+        // changes (set with animated:false). mapViewDidChangeVisibleRegion is the
+        // continuous, every-tick callback we actually want.
+        nonisolated func mapViewDidChangeVisibleRegion(_ mapView: MKMapView) {
             Task { @MainActor [weak mapView] in
                 guard let mapView = mapView else { return }
                 if !SharedMapViewRegistry.shared.isOwnedByCapture {
                     self.parent.onCameraChange?(mapView.camera)
                 }
             }
+        }
+
+        // A/B pins styled to match the SwiftUI version (ultraThinMaterial circle
+        // with the letter on top). Returning a custom MKAnnotationView here is
+        // what the user expected from the SwiftUI Annotation { pin("A") } code.
+        nonisolated func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
+            guard let labeled = annotation as? LabeledPointAnnotation else { return nil }
+            let identifier = "labeled-pin"
+            let view: MKAnnotationView
+            if let dequeued = mapView.dequeueReusableAnnotationView(withIdentifier: identifier) {
+                view = dequeued
+                view.annotation = annotation
+            } else {
+                view = MKAnnotationView(annotation: annotation, reuseIdentifier: identifier)
+            }
+            view.frame = CGRect(x: 0, y: 0, width: 34, height: 34)
+            view.canShowCallout = false
+
+            // Build a simple pin: circle background + letter label.
+            view.subviews.forEach { $0.removeFromSuperview() }
+            let bg = UIView(frame: view.bounds)
+            bg.backgroundColor = UIColor.white.withAlphaComponent(0.85)
+            bg.layer.cornerRadius = 17
+            bg.layer.borderWidth = 1.5
+            bg.layer.borderColor = UIColor.black.withAlphaComponent(0.25).cgColor
+            view.addSubview(bg)
+            let label = UILabel(frame: view.bounds)
+            label.text = labeled.label
+            label.textAlignment = .center
+            label.font = .systemFont(ofSize: 16, weight: .semibold)
+            label.textColor = .black
+            view.addSubview(label)
+            view.centerOffset = CGPoint(x: 0, y: -17)
+            return view
         }
 
         nonisolated func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
